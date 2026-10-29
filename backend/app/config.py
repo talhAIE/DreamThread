@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     worker_maintenance_seconds: float = Field(default=30, gt=0, le=300)
     worker_shutdown_seconds: float = Field(default=10, gt=0, le=60)
     checkpoint_retention_days: int = Field(default=7, ge=1, le=30)
+    agent_max_rounds: int = Field(default=4, ge=1, le=10)
+    agent_max_tool_calls: int = Field(default=8, ge=1, le=20)
+    agent_max_candidate_dreams: int = Field(default=12, ge=1, le=50)
+    agent_timeout_seconds: float = Field(default=90.0, gt=0, le=300)
+    agent_max_output_tokens: int = Field(default=2048, ge=256, le=8192)
 
     @field_validator(
         "nebius_api_key",

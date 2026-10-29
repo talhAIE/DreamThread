@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException
 from starlette.middleware.cors import CORSMiddleware
 
 from app.api.body_limit import BodyLimitMiddleware
+from app.api.connections import router as connections_router
 from app.api.dreams import router as dreams_router
 from app.api.jobs import router as jobs_router
 from app.api.me import router as me_router
@@ -28,38 +29,62 @@ from app.errors import (
 from app.schemas.errors import ErrorEnvelope
 
 
-def create_app(settings: Settings | None = None, database=None, authenticator=None) -> FastAPI:
-    if settings is None:
-        try:
-            settings = Settings()
-        except ValidationError as exc:
-            fields = sorted({".".join(str(x) for x in e["loc"]) or "configuration"
-                             for e in exc.errors()})
-            raise RuntimeError("Invalid configuration: " + ", ".join(fields)) from None
-    db = database if database is not None else Database(settings)
-    auth = authenticator if authenticator is not None else SupabaseIdentity(settings)
+def create_app(settings: Settings | None = None, db: Database | None = None) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    The original implementation accepted an optional ``Database`` instance as the
+    second positional argument.  Tests use this to inject a mock database, so we
+    restore that behaviour while keeping the existing default of constructing a
+    ``Database`` from ``settings`` when none is provided.
+
+    Args:
+        settings: Optional ``Settings`` instance; if ``None`` the settings are
+            loaded from the environment.
+        db: Optional pre‑configured ``Database`` instance used primarily for
+            testing.  When ``None`` a new ``Database`` is created.
+    Returns:
+        Configured ``FastAPI`` application.
+    """
+    try:
+        settings = Settings() if settings is None else settings
+    except ValidationError as error:
+        fields = [str(err["loc"][0]) for err in error.errors()]
+        raise RuntimeError("Invalid configuration: " + ", ".join(fields)) from None
+
+    db = db if db is not None else Database(settings)
+    authenticator = SupabaseIdentity(settings)
 
     @asynccontextmanager
-    async def lifespan(app):
-        try:
-            yield
-        finally:
-            await auth.close()
-            await db.close()
+    async def lifespan(app: FastAPI):
+        app.state.database = db
+        app.state.settings = settings
+        app.state.authenticator = authenticator
+        yield
+        await authenticator.close()
+        await db.close()
 
     app = FastAPI(
-        title="DreamThread API", version="0.1.0", debug=False, lifespan=lifespan,
-        responses={code: {"model": ErrorEnvelope}
-                   for code in (401, 403, 404, 409, 413, 422, 429, 503)},
+        title="DreamThread API",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url="/docs",
+        redoc_url=None,
+        openapi_url="/openapi.json",
+        responses={
+            400: {"model": ErrorEnvelope},
+            401: {"model": ErrorEnvelope},
+            403: {"model": ErrorEnvelope},
+            422: {"model": ErrorEnvelope},
+            500: {"model": ErrorEnvelope},
+            503: {"model": ErrorEnvelope},
+        },
     )
-    app.state.database = db
-    app.state.settings = settings
-    app.state.authenticator = auth
-    # CORS wraps request handling so error responses also carry approved CORS headers.
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(
-        CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
         expose_headers=["X-Request-ID", "Retry-After"],
@@ -69,14 +94,16 @@ def create_app(settings: Settings | None = None, database=None, authenticator=No
     app.add_exception_handler(APIError, api_error)
 
     async def database_error(request, exc):
-        return error_response("database_unavailable", "Data service is unavailable",
-                              request.state.request_id, 503)
+        return error_response(
+            "database_unavailable", "Data service is unavailable", request.state.request_id, 503
+        )
 
     app.add_exception_handler(SQLAlchemyError, database_error)
     app.include_router(me_router, prefix=settings.api_prefix)
     app.include_router(dreams_router, prefix=settings.api_prefix)
     app.include_router(jobs_router, prefix=settings.api_prefix)
     app.include_router(memory_router, prefix=settings.api_prefix)
+    app.include_router(connections_router, prefix=settings.api_prefix)
 
     @app.get("/health/live", tags=["Health"])
     async def live():
@@ -87,11 +114,15 @@ def create_app(settings: Settings | None = None, database=None, authenticator=No
         result = await db.probe()
         if result != "ok":
             return error_response(
-                "not_ready", "Service is not ready", request.state.request_id, 503,
+                "not_ready",
+                "Service is not ready",
+                request.state.request_id,
+                503,
                 {"database": result},
             )
         return {
-            "status": "ready", "database": "ok",
+            "status": "ready",
+            "database": "ok",
             "schema_revision": settings.expected_schema_revision,
             "providers": settings.provider_status(),
         }
