@@ -1,4 +1,4 @@
-# DreamThread backend - Phase 7
+# DreamThread backend - Phase 8
 
 Python 3.12, FastAPI, SQLAlchemy Core, Alembic, PostgreSQL and pgvector.
 This release includes the database foundation, verified authentication, profile/preferences
@@ -8,6 +8,8 @@ The worker now calls NVIDIA Nemotron through Nebius for extraction and tentative
 verifies source quotes, and publishes linked evidence atomically. Live account verification is
 pending the user's credentials; local tests use controlled provider responses. Phase 7 adds
 durable embedding jobs and tenant-scoped hybrid candidate retrieval with visible fallback.
+Phase 8 adds user-controlled personal memory, explicit identity links, durable detail
+corrections and follow-up answers with separate consent for saving personal meaning.
 
 ## Local setup
 
@@ -92,7 +94,8 @@ and source invalidation still belong to later phases.
   AI admission counters.
 - 0004_worker_checkpoints: lease/stage deadlines and private checkpoint artifacts.
 - 0005_embedding_spaces: tenant-private vector spaces and source-aligned embedding chunks.
-  Set EXPECTED_SCHEMA_REVISION=0005_embedding_spaces in existing .env files before starting.
+- 0006_personal_memory: association provenance/forgetting markers and follow-up answer versions.
+  Set EXPECTED_SCHEMA_REVISION=0006_personal_memory in existing .env files before starting.
 - app.alembic_version is readable by runtime for readiness; application DDL belongs to owner.
 - schema_v1.py/security_v1.py are frozen snapshots. Future changes use new migrations;
   never edit released snapshots. Runtime tables currently re-export baseline metadata.
@@ -226,7 +229,7 @@ is capped by MODEL_MAX_OUTPUT_TOKENS. A conservative UTF-8 byte bound (including
 output allowance and overhead) rejects oversized context before sending it; text is never
 silently truncated. Set MODEL_CONTEXT_TOKEN_BUDGET within the selected model's supported limit.
 
-Extraction and reflection have separate versioned prompts in app/prompts. PROMPT_VERSION=v1
+Extraction and reflection have separate versioned prompts in app/prompts. PROMPT_VERSION=v2
 must correspond to existing templates. Continuity and Detective prompts are reserved for
 later phases. Dream content is untrusted data, with no tools available to the model.
 
@@ -252,7 +255,7 @@ metadata only. This live check has **not** been run; the user deferred it until 
 See [capability status](docs/model-capabilities.md). Then run the API/worker and save a dream,
 poll its job, and retrieve /api/v1/dreams/{id}/analysis for the complete database-backed flow.
 Phase 6 changes the pipeline fingerprint; analyze the current dream again if an older job is stale.
-Phase 6 required no migration. Phase 7 advances the head to 0005_embedding_spaces.
+Phase 6 required no migration. The current migration head is 0006_personal_memory.
 
 ## Embeddings and retrieval
 
@@ -284,8 +287,8 @@ saved dreams, merging semantic top 8 with text and non-rejected motif matches. C
 motifs/associations receive stronger weight; rare shared words outrank generic text matches.
 Candidates include current IDs/revisions/hashes, dates, snippets and ranking reasons; fetch
 original source separately before evidence-based comparison. Similarity never creates an
-identity merge or connection. Comparison is Phase 9. Memory-editing endpoints arrive in Phase 8;
-retrieval can already consume confirmed records through the shared schema.
+identity merge or connection. Comparison is Phase 9. Personal memory and correction endpoints
+are available as described below; retrieval consumes confirmed enabled memory from this schema.
 
 Each response exposes degraded/reasons, active/target embedding versions, current archive
 coverage and the primary entry's latest indexing job. When vectors are absent, rebuilding or
@@ -329,6 +332,85 @@ to restore outstanding indexing after edits when needed.
 [Benchmark results](docs/retrieval-benchmark.json) record recall@5=1.0 on three queries over
 13 labeled fixture entries using real PostgreSQL and synthetic provider vectors. This is a
 pipeline regression check, not a claim about real model retrieval quality.
+
+## Personal memory, identities and corrections
+
+Run `uv run alembic upgrade head`, set EXPECTED_SCHEMA_REVISION=0006_personal_memory and
+PROMPT_VERSION=v2 in existing .env files, then restart API/worker. The new pipeline fingerprint
+withholds older cached analyses until reanalysis. v1 prompt files remain unchanged for history;
+v2 adds confirmed personal context and explicit user-correction provenance.
+
+GET /api/v1/motifs lists automatic mentions and user identities. Automatic mentions have
+source-specific IDs: two occurrences labeled "house" do not establish the same place. A
+successful analysis returns observations with detail_key, motif_id, origin and confirmation_state.
+The original text, revision and user-reported emotion tags are never overwritten by corrections.
+
+GET /api/v1/memory lists saved/suggested/rejected meanings, with origin, status, enabled and
+version. Both lists support limit and UUID after pagination; memory also accepts a status filter,
+and motifs accepts type. To explicitly save a personal meaning for a selected source identity:
+
+```json
+{
+  "motif_id": "ID_FROM_THE_SELECTED_OBSERVATION",
+  "source_dream_id": "OWNED_DREAM_ID",
+  "meaning": "This is my grandmother's home",
+  "status": "confirmed"
+}
+```
+
+POST /api/v1/memory requires Idempotency-Key. Supply either motif_id or
+motif={"type":"place","label":"Grandmother's home"} to create a separate user identity.
+source_dream_id is optional; providing it explicitly confirms that identity for the current saved
+source. A new label never silently merges an existing identity. PATCH /memory/{id} requires
+expected_version and changes to meaning, enabled or status. Confirming a model proposal can
+confirm its existing current-source mention; an edited source requires a fresh explicit link.
+DELETE /memory/{id}?expected_version=N forgets that memory and removes it from the library.
+
+Reflection inputs include at most eight confirmed enabled non-deleted meanings attached to a
+confirmed identity in the current revision. Equal labels alone cannot select another identity's
+personal meaning. Suggestions remain separate from user beliefs. Internal proposal persistence
+deduplicates normalized meanings and respects rejected/deleted decisions. Forgetting clears
+the meaning and keeps a small rejection fingerprint/decision record to prevent repeated proposals.
+This does not edit original journal entries or independently authored detail corrections.
+
+PATCH /api/v1/dreams/{id}/details requires Idempotency-Key and, for example:
+
+```json
+{
+  "expected_version": 1,
+  "detail_key": "KEY_FROM_CURRENT_ANALYSIS",
+  "label": "Grandmother's cottage"
+}
+```
+
+Use removed=true to remove a detail; replacement fields cannot accompany removal. Alternatively
+provide motif_id to explicitly identify the same place/person in another entry (and type if
+correcting its classification). A label/type correction creates a new user identity unless an
+existing motif_id is explicitly chosen. Overrides retain the original verified citation and their
+own stable source-span key. They survive worker retry, reordered model keys and reanalysis of
+the same immutable revision. Quotes remain original source text; corrected labels are marked
+origin=user. Editing the source creates a new revision and requires reviewing its details anew.
+
+GET /api/v1/dreams/{id}/followup returns the current question/version and latest saved answer.
+PUT on that route requires Idempotency-Key, expected_version (dream version), question_version
+and expected_answer_version (0 for a first answer). Supply answer or skipped=true. By default,
+an answer is entry-only clarification, not reusable personal meaning. Saving memory additionally
+requires save_as_association=true and an explicit owned motif_id. Editing an answer requires its
+current saved version; an existing owned question can be edited while rebuilding. Identical
+answered/skipped follow-up questions are suppressed on later analysis.
+
+Deleting/disabling a meaning saved from a follow-up excludes it from future inputs, including
+the answer-to-memory path. The original user answer remains private journal data. Assistant
+answers/reflections dependent on memory are invalidated and cleared; they cannot be served as
+current. Entry-only answers remain entry-only and are not passed to unrelated dreams.
+
+Memory/identity/detail/follow-up mutations advance memory_version and archive_version, clear
+private stage checkpoints and derived AI text, cancel superseded work, and queue all current
+saved entries for conservative rebuilding in the same transaction. Detail/answer edits also
+advance dream.version. A provider response cannot publish against the old snapshot. User
+decisions and overrides survive. Saving still works at quota exhaustion: automatic rebuilds
+wait for allowance. This MVP rebuilds a small owner archive; precise dependency scheduling and
+large-archive optimization remain later work. Live model quality has not been verified yet.
 
 ## Configuration and observability
 

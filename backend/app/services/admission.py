@@ -68,6 +68,9 @@ async def _reserve(connection, identity, settings, *, route, key, body, units, n
         "job.retry",
         "embedding.work",
         "dream.index",
+        "memory.create",
+        "dream.details",
+        "followup.answer",
     }:
         raise ValueError("Unsupported server-side operation")
     if type(units) is not int or units < 1:

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.providers.nebius import Nebius
 from app.schemas.analysis import Citation, Extraction, ReflectionOutput, VerifiedEvidence
 from app.services.evidence import OutputInvalid, verify_extraction, verify_reflections
+from app.services.personal_context import apply_overrides
 from app.workers.types import AnalysisPayload, Publication, WorkFailure
 
 PROMPTS = Path(__file__).parents[1] / "prompts"
@@ -113,6 +114,8 @@ class ExtractionPipeline:
             },
             lambda output: verify_extraction(output, source),
         )
+        context = await execution.personal_context()
+        extracted, annotations = apply_overrides(extracted, context, source)
         # The reserved whole-entry reference allows a useful first-entry reflection with no motifs.
         citations = {o.key: o.citation for o in extracted.observations}
         citations["dream"] = Citation(
@@ -128,6 +131,9 @@ class ExtractionPipeline:
                 "verified_observations": extracted.model_dump(mode="json"),
                 "allowed_observation_keys": list(citations),
                 "user_reported_emotions": execution.original["reported_emotions"],
+                "detail_provenance": annotations,
+                "personal_associations": context["associations"],
+                "entry_clarifications": context["clarifications"],
             },
             lambda output: verify_reflections(output, set(citations)),
         )
@@ -140,7 +146,13 @@ class ExtractionPipeline:
                 records.append(record)
             mapping[key] = by_span[span].id
         observations = [
-            {"key": o.key, "type": o.type, "label": o.label, "evidence_ids": [str(mapping[o.key])]}
+            {
+                "key": o.key,
+                "type": o.type,
+                "label": o.label,
+                "evidence_ids": [str(mapping[o.key])],
+                **annotations[o.key],
+            }
             for o in extracted.observations
         ]
         possible = [
@@ -153,14 +165,23 @@ class ExtractionPipeline:
         ]
         used_ids = {value for item in observations + possible for value in item["evidence_ids"]}
         records = [record for record in records if str(record.id) in used_ids]
+        followup = reflections.followup_question
+        if followup and followup.strip().casefold() in {
+            question.strip().casefold() for question in context["answered_questions"]
+        }:
+            followup = None
         return Publication(
             AnalysisPayload(
                 extraction={
                     "observations": observations,
                     "reported_emotions": execution.original["reported_emotions"],
+                    "personal_context": {
+                        "association_ids": [item["id"] for item in context["associations"]],
+                        "associations_omitted": context["associations_omitted"],
+                    },
                 },
                 reflections=possible,
-                followup=reflections.followup_question,
+                followup=followup,
             ),
             evidence=tuple(records),
             require_evidence=True,

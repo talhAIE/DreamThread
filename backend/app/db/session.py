@@ -67,7 +67,7 @@ class Database:
                     )).scalars())
                     if revisions != {self.expected}:
                         return "schema_mismatch"
-                    if self.expected == "0005_embedding_spaces":
+                    if self.expected in {"0005_embedding_spaces", "0006_personal_memory"}:
                         # Versioned spaces enforce their own dimensions. The legacy fixed-size
                         # vector column is retained for migration compatibility, never searched.
                         if self.dimensions is not None and not 1 <= self.dimensions <= 16000:

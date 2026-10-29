@@ -330,3 +330,68 @@ dimension, prefixes or chunking requires a new embedding version and complete re
 an atomic switch. The old complete space can serve consistent stored queries during rebuilding;
 partial coverage or missing primary vectors is disclosed. Text/motif fallback remains available
 without a provider request. No live provider behavior is verified yet.
+
+## Personal memory and corrections (Phase 8)
+
+- GET /api/v1/motifs?limit=20&after=UUID&type=place returns items and nullable next_after.
+  Each item has id, type, label, identity_confirmed, current_mentions and origin
+  (automatic_mention/user_identity/legacy). Automatic source mentions never imply shared identity.
+- GET /api/v1/memory?limit=20&after=UUID&status=confirmed returns items, next_after,
+  memory_version and archive_version. Memory rows expose id, motif_id, meaning, status, enabled,
+  origin (user/model/legacy), version, optional source_dream_id and timestamps. Deleted meanings
+  and internal rejection hashes are omitted. Filters are optional; limits are 1-100.
+- POST /memory requires Idempotency-Key. Provide meaning (1-1000 characters), exactly one of
+  motif_id or motif={type,label}, optional source_dream_id, status (default confirmed) and enabled
+  (default true). A new motif always creates a distinct user identity. An explicit source confirms
+  the chosen identity for that current saved revision. Returns 201 with the memory row.
+- PATCH /memory/{id} accepts expected_version and meaning/enabled/status. Null/empty changes
+  are rejected; a true no-op does not advance versions. Conflicting versions return 409.
+- DELETE /memory/{id}?expected_version=N returns 204. It erases the meaning, disables use and
+  retains a private rejection fingerprint/decision to suppress identical model suggestions.
+  Missing/deleted/other-owned IDs return 404; blind deletion without expected_version returns 422.
+
+Only confirmed enabled non-deleted associations linked to a confirmed current-source identity
+can enter reflection context. At most eight are included with omission metadata. User-authored
+memory is confirmed by the explicit POST action unless status=suggested/rejected is requested.
+Internal model proposals always start suggested and cannot assign identity by matching labels.
+Confirming a proposal can confirm its existing current-source mention; it cannot link an older
+proposal to a newly edited source revision automatically. Rejected/deleted normalized proposal
+signatures suppress identical suggestions; explicit user-authored memory remains possible.
+
+PATCH /dreams/{id}/details requires Idempotency-Key and:
+
+```json
+{"expected_version":1,"detail_key":"detail_<40 hex characters>","label":"Grandmother's cottage"}
+```
+
+Use a key returned by current analysis. Supply a label/type correction, an explicit owned motif_id,
+or removed=true. Removal cannot include replacements. Motif type must match corrected type.
+Returns dream_id, revision_id, dream_version, detail_key, removed, corrected_value (including
+the original observation/citation), memory_version and nullable analysis_job_id. Corrections are
+revision-bound, stored separately and applied after literal quote verification, before reflection.
+They keep their original key across reanalysis; changed model keys/overlapping quote widths do
+not undo the override. Corrected labels are user statements, not verbatim quotes. New source
+revisions need new review. Another user's IDs return 404, stale versions/details return 409.
+
+GET /dreams/{id}/followup returns dream_id/revision_id/dream_version, nullable question/version,
+status (available/answered/skipped/not_available) and nullable latest_answer. A saved answer
+contains id, version, question_version, answer, skipped, save_as_association and association_id.
+The latest original answer may remain visible while a current AI question is unavailable.
+
+PUT /dreams/{id}/followup requires Idempotency-Key, expected_version, question_version (40 hex),
+expected_answer_version (default 0), and either answer or skipped=true. Saving reusable meaning
+requires save_as_association=true plus motif_id. Without consent, text is entry-only clarification;
+skipping creates no memory. Owned existing questions can be edited during rebuilding with both
+current version counters. Unknown/stale question/source/answer versions return 409. Retrying a
+key replays without another mutation; reusing it with different input returns 409. Editing or
+withdrawing a saved answer retires its previous association. Repeated identical answered/skipped
+questions are suppressed. Forgotten follow-up memory cannot return through entry clarification.
+
+All substantive memory/correction/answer mutations atomically advance memory/archive versions,
+clear old AI content/checkpoints, cancel superseded jobs, and requeue current saved entries.
+Detail and follow-up edits also increment dream.version without rewriting immutable source.
+User data persists even with exhausted AI allowance; rebuild jobs wait for quota. No-op memory
+PATCH does not rebuild. Internal unconfirmed proposal insertion alone does not invalidate AI.
+Source/lease/memory fences reject late model results. User overrides and rejection decisions
+are preserved. Broad owner invalidation is intentional for this MVP. Live provider verification
+remains pending credentials; the API contract is tested with real PostgreSQL and mocked SDK transport.

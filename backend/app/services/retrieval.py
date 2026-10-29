@@ -147,6 +147,7 @@ class RetrievalService:
                             A.c.user_id == user,
                             A.c.status == "confirmed",
                             A.c.enabled.is_(True),
+                            A.c.deleted_at.is_(None),
                         )
                     )
                 )

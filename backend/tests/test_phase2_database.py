@@ -119,7 +119,7 @@ def dream(connection, user, title="A house"):
 def test_schema_security_catalog_and_existing_upgrade(cluster):
     with cluster["admin"].connect() as c:
         revision = c.scalar(text("SELECT version_num FROM app.alembic_version"))
-        assert revision == "0005_embedding_spaces"
+        assert revision == "0006_personal_memory"
         assert c.scalar(text("SELECT count(*) FROM app.accounts")) == 2
         assert c.scalar(text("SELECT count(*) FROM pg_tables WHERE schemaname='app'")) == 37
         assert c.scalar(text("""
@@ -275,7 +275,7 @@ def test_async_tenant_context_and_readiness(cluster):
     async def check():
         url = cluster["urls"]["app"].render_as_string(hide_password=False)
         db = Database(Settings(_env_file=None, database_url=url, db_pool_size=1,
-                               expected_schema_revision="0005_embedding_spaces",
+                               expected_schema_revision="0006_personal_memory",
                                embedding_dimensions=3))
         try:
             assert await db.probe() == "ok"
@@ -287,7 +287,7 @@ def test_async_tenant_context_and_readiness(cluster):
                 assert (await c.execute(text("SELECT id FROM app.accounts"))).all() == []
             db.expected = "wrong"
             assert await db.probe() == "schema_mismatch"
-            db.expected = "0005_embedding_spaces"
+            db.expected = "0006_personal_memory"
             db.dimensions = 16001
             assert await db.probe() == "schema_mismatch"
         finally:
@@ -300,7 +300,7 @@ def test_owner_connection_is_not_runtime_ready(cluster):
     async def check():
         url = str(cluster["admin"].url)
         db = Database(Settings(_env_file=None, database_url=url,
-                               expected_schema_revision="0005_embedding_spaces",
+                               expected_schema_revision="0006_personal_memory",
                                embedding_dimensions=3))
         try:
             assert await db.probe() == "unsafe_role"
@@ -321,7 +321,7 @@ def test_live_server_with_restricted_database_role(cluster):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         env={**os.environ, "APP_ENV": "test",
              "DATABASE_URL": cluster["urls"]["app"].render_as_string(hide_password=False),
-             "EXPECTED_SCHEMA_REVISION": "0005_embedding_spaces", "EMBEDDING_DIMENSIONS": "3"},
+             "EXPECTED_SCHEMA_REVISION": "0006_personal_memory", "EMBEDDING_DIMENSIONS": "3"},
     )
     try:
         deadline = time.monotonic() + 10

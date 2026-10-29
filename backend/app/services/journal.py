@@ -30,7 +30,7 @@ ANALYSES = tables["app.analyses"]
 
 def pipeline_version(settings):
     values = [
-        "single-entry-evidence-v1",
+        "single-entry-personal-memory-v1",
         settings.prompt_version,
         settings.embedding_version,
         settings.nebius_extraction_model,

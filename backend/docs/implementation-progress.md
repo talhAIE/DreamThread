@@ -298,3 +298,62 @@ Remaining verification and boundaries:
 - Source mutation still conservatively cancels owner jobs; the documented reindex command can
   refill outstanding indexing. Run migrations and update EXPECTED_SCHEMA_REVISION before use.
 - The isolated test server is stopped after verification; installed database services are untouched.
+
+## Phase 8 - October 29, 2026
+
+Implemented:
+
+- Owned paginated motif/memory APIs; explicit user identities and personal meanings; versioned
+  edits, confirmation/rejection, disable and forget operations. Model proposals retain provenance,
+  remain suggested until confirmed, and respect stored normalized rejection/forgetting signatures.
+- Source-local automatic mention IDs, without label-based identity merging. Explicit user links
+  can share identity between entries. Publication persists mention/evidence links atomically and
+  preserves existing confirmation/rejection decisions.
+- Revision-bound detail overrides/removals anchored to original verified spans, applied before
+  reflection and marked as user corrections. Original source/quotes and reported moods stay intact.
+- Versioned GET/PUT follow-up flow, answer/skip, entry-only clarification and separate explicit
+  consent/motif selection for reusable memory. Forgotten follow-up meaning cannot return through
+  its saved-answer path; original user answers remain private journal records.
+- Personal context loading through leased tenant transactions: confirmed enabled non-deleted
+  associations on confirmed current-source identities only, bounded to eight with omission metadata.
+- Memory/archive version advancement, derived-text/checkpoint invalidation, old-job cancellation
+  and conservative saved-archive rebuild queues in the same transaction. Detail/answer edits advance
+  dream.version; automatic rebuilding defers at quota rather than blocking saved corrections.
+- Migration 0006_personal_memory adds provenance/forgetting fields and follow-up versions without
+  changing the 37-table count. New v2 extraction/reflection prompts preserve released v1 files.
+  Pipeline fingerprint, Compose/default configuration and API/setup documentation are updated.
+
+Verification:
+
+- Ruff passed. Full suite: **151 passed, zero skipped**, including real PostgreSQL 18.4/pgvector
+  migration upgrade/downgrade/rebuild, tenant checks and real SDK requests through fixture transport.
+- A saved grandmother's-home association enters the next linked analysis and affects its fixture
+  reflection. Suggested, disabled, deleted and unrelated equal-label identities are absent from inputs.
+- Two automatic houses remain distinct until an explicit user identity link; only confirmed links
+  carry their personal meanings. Confirming a model proposal activates its existing source mention.
+- User label corrections survive transient worker retry, cached raw extraction and reanalysis.
+  Removal survives model key/quote-width changes. Original text/revision/mood tags remain unchanged.
+- Foreign motif/memory/source/detail/follow-up IDs are rejected; concurrent memory edits yield one
+  success and one conflict. Pagination is owner scoped. Replayed writes avoid duplicate mutations.
+- Rejected/deleted model meanings cannot be reproposed identically. Forgetting clears stored meaning.
+- Follow-up consent, private entry-only clarification, skip, answer editing/version conflicts and
+  repeated-question suppression passed. Forgotten memory is absent from subsequent model data,
+  including saved follow-up text previously promoted to memory.
+- Memory deletion clears dependent assistant answers/checkpoints and prevents an in-flight model
+  result from publishing; fresh queued work excludes removed meaning. Simulated queue failure rolls
+  back memory/identity/version/invalidation together; quota exhaustion preserves saved memory.
+- Live Uvicorn/OpenAPI/request-ID/database-unavailable smoke passed; probe --help made no API call.
+
+Remaining checks and boundaries:
+
+- Live Nemotron/embedding verification remains pending keys under the user's development-first
+  instruction. Fixture generation demonstrates data flow, not real model interpretation quality.
+- The memory proposal writer is an internal service for later agent work, not a model-controlled
+  identity selector or public write tool. Comparison/continuity remain Phase 9.
+- Corrections are revision-bound. Forgetting memory does not rewrite independently authored
+  original dream text, user detail labels or original follow-up journal answers.
+- Rebuilding currently invalidates the small owner's archive conservatively; precise dependencies,
+  large-archive scheduling and broader retention remain later work. Hosted auth, Docker and hosted
+  CI execution remain deployment verification tasks.
+- Update EXPECTED_SCHEMA_REVISION=0006_personal_memory and PROMPT_VERSION=v2, migrate, then restart.
+- The isolated test server is stopped after verification; installed DB services are untouched.

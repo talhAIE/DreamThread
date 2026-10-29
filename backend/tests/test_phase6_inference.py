@@ -47,6 +47,10 @@ class MemoryExecution:
     async def set_stage(self, stage):
         self.stages.append(stage)
 
+    async def personal_context(self):
+        from app.services.personal_context import empty_context
+        return empty_context()
+
     async def record_call(self, **metadata):
         run_id = uuid4()
         self.runs.append({"id": run_id, **metadata})

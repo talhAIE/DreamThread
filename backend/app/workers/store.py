@@ -16,6 +16,7 @@ from app.services.admission import reserve_ai
 from app.services.evidence import OutputInvalid, verify_citation
 from app.services.indexing import EmbeddingPublication, IndexService
 from app.services.journal import pipeline_version
+from app.services.personal_context import load_context, publish_mentions
 from app.workers.types import (
     LeaseLost,
     SourceChanged,
@@ -380,6 +381,8 @@ class Store:
                     )
                 )
             values.update(state="ready")
+            if publication.require_evidence:
+                await publish_mentions(c, current["user_id"], dream, values["extraction"])
             analysis_id = await c.scalar(
                 insert(ANALYSES)
                 .values(
@@ -582,6 +585,13 @@ class Execution:
 
     async def get_source(self, dream_id):
         return await self.store.source(self, UUID(str(dream_id)))
+
+    async def personal_context(self):
+        async with self.store.locked(self.job, self.sources) as (c, account, dreams, current, _):
+            self.store.guard(account, dreams, current, self.sources)
+            return await load_context(
+                c, current["user_id"], self.primary.dream_id, self.primary.revision_id
+            )
 
     async def set_stage(self, stage):
         await self.store.stage(self, stage)

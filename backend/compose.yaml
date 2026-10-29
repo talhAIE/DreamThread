@@ -5,7 +5,7 @@ x-inference-environment: &inference_environment
   NEBIUS_REASONING_MODEL: ${NEBIUS_REASONING_MODEL:-}
   NEBIUS_EMBEDDING_MODEL: ${NEBIUS_EMBEDDING_MODEL:-}
   NEBIUS_OUTPUT_MODE: ${NEBIUS_OUTPUT_MODE:-json_object}
-  PROMPT_VERSION: ${PROMPT_VERSION:-v1}
+  PROMPT_VERSION: ${PROMPT_VERSION:-v2}
   EMBEDDING_VERSION: ${EMBEDDING_VERSION:-v1}
   EMBEDDING_DOCUMENT_PREFIX: ${EMBEDDING_DOCUMENT_PREFIX-}
   EMBEDDING_QUERY_PREFIX: ${EMBEDDING_QUERY_PREFIX-}
@@ -40,7 +40,7 @@ services:
       SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
       APP_ENV: development
       DATABASE_URL: postgresql+psycopg://dreamthread_app:local-runtime-only@db:5432/dreamthread
-      EXPECTED_SCHEMA_REVISION: 0005_embedding_spaces
+      EXPECTED_SCHEMA_REVISION: 0006_personal_memory
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-0}
       CORS_ORIGINS: '["http://localhost:3000"]'
     ports:
@@ -56,7 +56,7 @@ services:
       APP_ENV: development
       DATABASE_URL: postgresql+psycopg://dreamthread_app:local-runtime-only@db:5432/dreamthread
       QUEUE_DATABASE_URL: postgresql+psycopg://dreamthread_claimer:local-queue-only@db:5432/dreamthread
-      EXPECTED_SCHEMA_REVISION: 0005_embedding_spaces
+      EXPECTED_SCHEMA_REVISION: 0006_personal_memory
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-0}
     healthcheck:
       disable: true # Worker has no HTTP listener; monitor process and job age.

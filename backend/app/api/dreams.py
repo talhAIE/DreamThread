@@ -15,7 +15,9 @@ from app.schemas.dreams import (
     DreamQuery,
     Revision,
 )
+from app.schemas.memory import DetailPatch, DetailResult, FollowupPut, FollowupView
 from app.schemas.retrieval import CandidateResult, IndexRequest, IndexResult
+from app.services.corrections import CorrectionService
 from app.services.indexing import IndexService
 from app.services.journal import JournalService
 from app.services.retrieval import RetrievalService
@@ -106,3 +108,36 @@ async def candidates(request: Request, identity: CurrentIdentity, dream_id: UUID
         identity,
         dream_id,
     )
+
+
+@router.patch("/{dream_id}/details", response_model=DetailResult)
+async def details(
+    request: Request,
+    identity: CurrentIdentity,
+    dream_id: UUID,
+    payload: DetailPatch,
+    idempotency_key: IdempotencyKey,
+):
+    return await CorrectionService(request.app.state.database, request.app.state.settings).details(
+        identity, dream_id, payload, idempotency_key
+    )
+
+
+@router.get("/{dream_id}/followup", response_model=FollowupView)
+async def get_followup(request: Request, identity: CurrentIdentity, dream_id: UUID):
+    return await CorrectionService(
+        request.app.state.database, request.app.state.settings
+    ).get_followup(identity, dream_id)
+
+
+@router.put("/{dream_id}/followup", response_model=FollowupView)
+async def put_followup(
+    request: Request,
+    identity: CurrentIdentity,
+    dream_id: UUID,
+    payload: FollowupPut,
+    idempotency_key: IdempotencyKey,
+):
+    return await CorrectionService(
+        request.app.state.database, request.app.state.settings
+    ).put_followup(identity, dream_id, payload, idempotency_key)
