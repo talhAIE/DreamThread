@@ -1,4 +1,14 @@
-x-inference-environment: &inference_environment
+# Application containers connect to hosted Neon. No local PostgreSQL service or volume.
+x-runtime-environment: &runtime_environment
+  APP_ENV: ${APP_ENV:-development}
+  DATABASE_URL: ${DATABASE_URL:?Configure the restricted Neon runtime URL in .env}
+  EXPECTED_SCHEMA_REVISION: ${EXPECTED_SCHEMA_REVISION:-0006_personal_memory}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-3}
+  QUEUE_POOL_SIZE: ${QUEUE_POOL_SIZE:-1}
+  DB_TIMEOUT_SECONDS: ${DB_TIMEOUT_SECONDS:-20}
+  DB_CONNECT_TIMEOUT_SECONDS: ${DB_CONNECT_TIMEOUT_SECONDS:-15}
+  DB_POOL_RECYCLE_SECONDS: ${DB_POOL_RECYCLE_SECONDS:-300}
+  EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-0}
   NEBIUS_BASE_URL: ${NEBIUS_BASE_URL:-https://api.tokenfactory.nebius.com/v1/}
   NEBIUS_API_KEY: ${NEBIUS_API_KEY:-}
   NEBIUS_EXTRACTION_MODEL: ${NEBIUS_EXTRACTION_MODEL:-}
@@ -15,54 +25,44 @@ x-inference-environment: &inference_environment
   MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-60}
   MODEL_MAX_OUTPUT_TOKENS: ${MODEL_MAX_OUTPUT_TOKENS:-2048}
   MODEL_CONTEXT_TOKEN_BUDGET: ${MODEL_CONTEXT_TOKEN_BUDGET:-32768}
+  JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+  WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1}
+  JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-120}
+  JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-20}
+  JOB_STAGE_TIMEOUT_SECONDS: ${JOB_STAGE_TIMEOUT_SECONDS:-90}
+  JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-300}
+  JOB_RETRY_BASE_SECONDS: ${JOB_RETRY_BASE_SECONDS:-2}
+  JOB_RETRY_MAX_SECONDS: ${JOB_RETRY_MAX_SECONDS:-60}
+  WORKER_MAINTENANCE_SECONDS: ${WORKER_MAINTENANCE_SECONDS:-30}
+  WORKER_SHUTDOWN_SECONDS: ${WORKER_SHUTDOWN_SECONDS:-10}
+  CHECKPOINT_RETENTION_DAYS: ${CHECKPOINT_RETENTION_DAYS:-7}
+  AI_DAILY_LIMIT: ${AI_DAILY_LIMIT:-100}
+  ANONYMOUS_AI_DAILY_LIMIT: ${ANONYMOUS_AI_DAILY_LIMIT:-5}
+  DEMO_ENABLED: ${DEMO_ENABLED:-false}
 
 services:
-  db:
-    image: pgvector/pgvector:0.8.0-pg16
-    environment:
-      POSTGRES_USER: dreamthread
-      POSTGRES_PASSWORD: local-development-only
-      POSTGRES_DB: dreamthread
-    ports:
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - dreamthread_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dreamthread -d dreamthread"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
   api:
     build: .
     environment:
-      <<: *inference_environment
+      <<: *runtime_environment
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
-      APP_ENV: development
-      DATABASE_URL: postgresql+psycopg://dreamthread_app:local-runtime-only@db:5432/dreamthread
-      EXPECTED_SCHEMA_REVISION: 0006_personal_memory
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-0}
-      CORS_ORIGINS: '["http://localhost:3000"]'
+      AUTH_TIMEOUT_SECONDS: ${AUTH_TIMEOUT_SECONDS:-5}
+      MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-131072}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
     ports:
       - "127.0.0.1:8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
   worker:
     build: .
     command: ["/srv/.venv/bin/python", "-m", "app.workers.main"]
     environment:
-      <<: *inference_environment
-      APP_ENV: development
-      DATABASE_URL: postgresql+psycopg://dreamthread_app:local-runtime-only@db:5432/dreamthread
-      QUEUE_DATABASE_URL: postgresql+psycopg://dreamthread_claimer:local-queue-only@db:5432/dreamthread
-      EXPECTED_SCHEMA_REVISION: 0006_personal_memory
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-0}
+      <<: *runtime_environment
+      QUEUE_DATABASE_URL: ${QUEUE_DATABASE_URL:?Configure the restricted Neon queue URL in .env}
+      # Required by production Settings; this worker does not validate HTTP tokens.
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
     healthcheck:
-      disable: true # Worker has no HTTP listener; monitor process and job age.
+      disable: true # Monitor process and job age; worker has no HTTP listener.
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-volumes:
-  dreamthread_pgdata:

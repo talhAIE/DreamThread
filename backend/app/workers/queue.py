@@ -6,7 +6,9 @@ from uuid import uuid4
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.db.connections import connect_args
 from app.db.models import tables
+from app.db.roles import unsafe_login
 from app.workers.types import WorkFailure
 
 J = tables["app.jobs"]
@@ -19,12 +21,15 @@ class Queue:
         self.settings = settings
         self.engine = create_async_engine(
             settings.queue_database_url.get_secret_value(),
-            pool_size=2,
+            pool_size=settings.queue_pool_size,
             pool_pre_ping=True,
             pool_timeout=settings.db_timeout_seconds,
             max_overflow=0,
+            pool_recycle=settings.db_pool_recycle_seconds,
             hide_parameters=True,
-            connect_args={"connect_timeout": 3},
+            connect_args=connect_args(
+                settings.queue_database_url.get_secret_value(), settings.db_connect_timeout_seconds
+            ),
         )
 
     async def check_role(self):
@@ -38,7 +43,7 @@ class Queue:
                 FROM pg_roles WHERE rolname=current_user
             """)
             )
-            if not allowed:
+            if not allowed or await unsafe_login(c):
                 raise RuntimeError("Queue connection must have only the restricted queue role")
 
     async def claim(self):

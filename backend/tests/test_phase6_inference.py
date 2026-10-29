@@ -410,3 +410,31 @@ def test_truncated_completion_never_becomes_a_published_result():
         assert error.value.code == "invalid_output" and len(calls) == 2
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B", MODEL])
+def test_nano_direct_answer_mode_produces_validated_evidence_with_bounded_budget(model):
+    async def check():
+        execution, calls = MemoryExecution(), []
+        settings = config().model_copy(update={"nebius_extraction_model": model})
+
+        def transport(request):
+            payload = json.loads(request.content)
+            calls.append(payload)
+            assert payload["max_tokens"] == 2048
+            if model != MODEL:
+                # Simulate the observed hosted failure when thinking consumes the budget.
+                if payload.get("chat_template_kwargs") != {"enable_thinking": False}:
+                    return completion("", finish="length")
+            else:
+                assert "chat_template_kwargs" not in payload
+            return completion(extraction(execution) if len(calls) == 1 else reflection())
+
+        result = await ExtractionPipeline(
+            settings, Nebius(settings, transport=httpx.MockTransport(transport))
+        ).run(execution)
+        assert result.require_evidence and len(result.evidence) == 1
+        assert len(calls) == 2
+        assert [run["status"] for run in execution.runs] == ["validated", "validated"]
+
+    asyncio.run(check())

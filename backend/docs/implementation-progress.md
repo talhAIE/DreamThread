@@ -357,3 +357,75 @@ Remaining checks and boundaries:
   CI execution remain deployment verification tasks.
 - Update EXPECTED_SCHEMA_REVISION=0006_personal_memory and PROMPT_VERSION=v2, migrate, then restart.
 - The isolated test server is stopped after verification; installed DB services are untouched.
+
+## Neon database transition - October 29, 2026
+
+Implemented:
+
+- Hosted Neon is the application PostgreSQL/pgvector target. Supabase remains Auth (and optional
+  future voice storage), Nebius remains AI. Compose now runs only API/worker; no local DB service,
+  public development DB passwords or DB volume are part of the application setup.
+- Shared URL handling accepts copied PostgreSQL URLs, selects psycopg, requires direct Neon
+  endpoints and verified TLS, and resolves a certifi CA bundle within Windows/Linux/container
+  runtimes. Pooling endpoints/disabled TLS/missing Neon credentials are rejected safely.
+- Small configurable runtime/queue pools, pool pre-ping/recycling and cold-start connection
+  timeouts. Runtime and queue guards reject inherited neon_superuser/broad data memberships and
+  elevated role attributes, not just directly assigned BYPASSRLS.
+- Managed-service-compatible group provisioning: safe SQL-created roles, without attempting
+  superuser-only ALTER ROLE flags. Unsafe existing groups/logins or unexpected memberships fail
+  visibly. Existing passwords are never reset automatically.
+- configure_neon.py generates three distinct private SQL-login URLs from one administrator URL
+  while preserving existing credentials and unrelated .env settings. It makes no network call.
+- provision_database.py --neon-logins validates one endpoint/database, provisions extension/groups/
+  restricted logins, safely quotes password literals and sanitizes exception output.
+- check_neon.py --live performs read-only hosted role/TLS/vector/schema/transaction-context checks.
+  Administrator/migration URLs are excluded from application container environments.
+- Updated .env.example, README, detailed docs/neon-setup.md and the root implementation plan.
+  Current schema remains 0006_personal_memory; this infrastructure change needs no new migration.
+
+Verification:
+
+- Ruff passed. Available regression suite: **95 passed, 76 database integration tests skipped**.
+  Tests cover TLS/driver normalization, pooler rejection, certificate selection, role separation,
+  distinct generated passwords, idempotent configuration, cross-project credential preservation,
+  inherited admin rejection, safe SQL password quoting and absence of local DB/admin container config.
+- Live local Uvicorn/OpenAPI/request-ID/database-unavailable smoke passed without a DB server.
+- All three setup/check CLI help commands passed. Lockfile updated offline for explicit certifi.
+- No local PostgreSQL server was started for this transition. Existing local data was not copied,
+  deleted or modified. CI's disposable PostgreSQL service remains test infrastructure only.
+
+Remaining verification:
+
+- No Neon credentials are configured. Hosted role/extension provisioning, migrations, TLS/network,
+  cold-start behavior and check_neon.py --live remain pending the user's private connection URL.
+- Destructive database fixtures were deliberately not pointed at Neon or a local database. Run
+  them in isolated CI; use a separate Neon branch and the hosted smoke for account-specific checks.
+- Docker is unavailable on this machine, so container build/Compose execution remains pending.
+- Live Supabase Auth and Nebius/model probes remain pending private credentials as previously agreed.
+- Direct endpoints are the supported connection contract. Transaction pooling is deferred until
+  explicit tenant-context/prepared-statement compatibility and hosted acceptance checks exist.
+
+### Hosted model setup verification (2026-10-29)
+
+- User successfully provisioned the hosted Neon groups, SQL logins and pgvector; hosted migrations
+  and the read-only Neon acceptance check are still pending.
+- Qwen/Qwen3-Embedding-8B live probe passed with 4096 dimensions, saved privately in .env.
+- Nemotron 3 Nano initially exhausted its 2048-token budget with finish_reason=length and no JSON.
+  The provider now disables thinking for this model family using chat_template_kwargs; other
+  models keep their existing request contract. Source, schema and reflection validation remain intact.
+- The inference probe catalog client now disables environment proxies and redirects, matching
+  production inference and the embedding probe.
+- Live synthetic extraction and reflection passed with three evidence citations, two validated calls,
+  and 614/220 output tokens respectively. No journal content or credentials were printed.
+- Extraction regression tests: 21 passed, including Nano's bounded direct-answer mode and unchanged
+  request behavior for older models. Live Supabase sign-in verification remains pending.
+
+### Hosted Neon acceptance (2026-10-29)
+
+- Applied Alembic migrations to the configured Neon database; revision 0006_personal_memory.
+- Live acceptance passed: runtime role, queue role, client TLS, pgvector placement and transaction-local
+  tenant context/reset. The check performs no journal writes or model calls.
+- Corrected the readiness script to inspect libpq's client TLS state, since pg_stat_ssl describes
+  the PostgreSQL-side hop behind Neon's proxy. Verified TLS configuration remains required.
+- Regression coverage checks both encrypted client acceptance and unencrypted client rejection.
+- API/worker startup and real Supabase user sign-in remain to be verified.

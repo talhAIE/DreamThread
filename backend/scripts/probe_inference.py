@@ -10,6 +10,7 @@ import hashlib
 import json
 from uuid import uuid4
 
+import httpx
 from openai import AsyncOpenAI
 
 from app.config import Settings
@@ -58,6 +59,7 @@ async def probe():
         base_url=settings.nebius_base_url,
         max_retries=0,
         timeout=settings.model_timeout_seconds,
+        http_client=httpx.AsyncClient(trust_env=False, follow_redirects=False),
     ) as client:
         catalog = await client.models.list()
         if settings.nebius_extraction_model not in {model.id for model in catalog.data}:

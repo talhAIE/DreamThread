@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
     db_pool_size: int = Field(default=3, ge=1, le=20)
     db_timeout_seconds: float = Field(default=3, gt=0, le=30)
+    db_connect_timeout_seconds: int = Field(default=15, ge=3, le=60)
+    db_pool_recycle_seconds: int = Field(default=300, ge=30, le=3600)
+    queue_pool_size: int = Field(default=1, ge=1, le=5)
     expected_schema_revision: str = "0006_personal_memory"
     supabase_url: str | None = None
     supabase_publishable_key: SecretStr | None = None
@@ -83,15 +86,13 @@ class Settings(BaseSettings):
     @field_validator("database_url", "queue_database_url")
     @classmethod
     def validate_database(cls, value: SecretStr | None) -> SecretStr | None:
+        from app.db.connections import postgres_url
+
         if value is None:
             return value
-        try:
-            url = make_url(value.get_secret_value())
-            if url.drivername != "postgresql+psycopg" or not url.host or not url.database:
-                raise ValueError
-        except Exception:
-            raise ValueError("must be a PostgreSQL psycopg URL with host and database") from None
-        return value
+        return SecretStr(
+            postgres_url(value.get_secret_value()).render_as_string(hide_password=False)
+        )
 
     @field_validator("api_prefix")
     @classmethod

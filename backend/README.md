@@ -1,6 +1,7 @@
 # DreamThread backend - Phase 8
 
-Python 3.12, FastAPI, SQLAlchemy Core, Alembic, PostgreSQL and pgvector.
+Python 3.12, FastAPI, SQLAlchemy Core, Alembic, Neon PostgreSQL and pgvector.
+Supabase provides authentication; Neon stores the journal, memory, embeddings and durable jobs.
 This release includes the database foundation, verified authentication, profile/preferences
 endpoints, shared AI quota admission, and the dream journal API with immutable revisions,
 durable analysis submissions, source invalidation and a recoverable background worker.
@@ -11,46 +12,56 @@ durable embedding jobs and tenant-scoped hybrid candidate retrieval with visible
 Phase 8 adds user-controlled personal memory, explicit identity links, durable detail
 corrections and follow-up answers with separate consent for saving personal meaning.
 
-## Local setup
+## Neon setup and running the backend
 
-Install Python 3.12, uv and Docker with Compose. Run from backend/:
+Install Python 3.12 and uv. A local PostgreSQL installation is not required. Docker is optional
+for running the API/worker containers. Start with [the complete Neon guide](docs/neon-setup.md).
+Create a Neon project/database, copy its administrator connection URL with connection pooling
+OFF, then run from backend/:
 
 ```powershell
 uv sync --locked
 Copy-Item .env.example .env
-docker compose up -d db
-$env:ADMIN_DATABASE_URL = 'postgresql+psycopg://dreamthread:local-development-only@localhost:5432/dreamthread'
-uv run python scripts/provision_database.py --local-logins
+# Edit .env: replace ADMIN_DATABASE_URL with the direct Neon administrator URL.
+uv run python scripts/configure_neon.py
+uv run python scripts/provision_database.py --neon-logins
 ```
 
-Provisioning explicitly creates pgvector in schema extensions, NOLOGIN privilege groups and,
-with --local-logins, development-only login roles. Existing passwords are not reset.
-The administrator key is used only for provisioning. Do not pass it to the API or worker.
-Local passwords committed in .env.example/Compose are public development fixtures only.
+configure_neon.py generates separate random private runtime/migration/queue credentials in .env,
+preserving existing credentials and integration keys on rerun. It makes no network request.
+Provisioning creates pgvector in extensions, NOLOGIN groups and restricted logins through SQL.
+Do not create application roles through Neon's Roles UI/API: those inherit neon_superuser.
+Existing passwords are not reset. Administrator credentials are setup-only; Compose passes
+neither administrator nor migration secrets to application containers.
 
-Set EMBEDDING_DIMENSIONS in your private .env to the actual dimension measured in Phase 0,
-then migrate with the dedicated migration URL from .env:
+Configure Supabase Auth, Nebius model/key and verified embedding prefixes in .env. Measure
+EMBEDDING_DIMENSIONS with scripts/probe_embeddings.py --live, then migrate using the dedicated URL:
 
 ```powershell
 uv run alembic upgrade head
 uv run python scripts/check_database.py
+uv run python scripts/check_neon.py --live
 uv run uvicorn app.main:create_app --factory --loop app.loop:create_loop --reload --port 8000 --no-access-log
 ```
 
-No migration can create vector columns without an explicit positive dimension. Tests use
-three-dimensional synthetic vectors; **3 is not a recommended production embedding size**.
-The API checks its dimension against the recorded database dimension. Changing models or D
-requires a deliberate future embedding migration, not an environment-only change.
+In another terminal, run `uv run python -m app.workers.main` from backend/. Both processes read
+.env; restart them after changes. The hosted Neon smoke is read-only and makes no model calls.
+It remains pending actual Neon credentials; documentation/configuration alone is not a live check.
+
+The baseline migration requires a measured positive embedding dimension. Versioned embedding
+spaces now enforce their own dimensions; a model/dimension change requires a new embedding version
+and complete rebuild before atomic activation. Synthetic test dimension 3 is not a model setting.
 
 Open http://localhost:8000/docs. GET /health/live checks process health. GET /health/ready
 checks the database role, schema revision and dimension without billable model requests.
 Missing/unavailable DB, mismatched schema or an owner/superuser connection returns safe 503.
 Providers are marked configured_unverified until real provider probes are performed.
 
-After host-side provisioning/migration, run containers with docker compose up --build -d.
-Compose API uses the restricted local runtime login and EMBEDDING_DIMENSIONS from .env;
-without a dimension it deliberately fails configuration validation. The named DB volume
-persists across restarts; do not delete it as a generic troubleshooting step.
+After provisioning/migration, optionally run `docker compose up --build -d`. Compose includes only
+API and worker, both connecting to Neon; it has no database service or database volume. Set the
+measured EMBEDDING_DIMENSIONS before starting containers. Host-run Python commands do not need Docker.
+Existing local data is not copied or deleted by this update; application data transfer is a separate
+explicit operation if ever needed.
 
 ## Database ownership and access
 
@@ -60,17 +71,20 @@ persists across restarts; do not delete it as a generic troubleshooting step.
 | dreamthread_runtime | Tenant-scoped CRUD, no DDL/ownership/BYPASSRLS; revisions cannot update |
 | dreamthread_queue | Jobs SELECT and lease-column UPDATE only; no journal access |
 
-Production: run scripts/provision_database.py without --local-logins using an administrator
-connection, then create independent login roles with strong private passwords and grant each
-exactly one group above. Configure MIGRATION_DATABASE_URL only in the release/migration
-environment. Keep DATABASE_URL runtime-only and future QUEUE_DATABASE_URL claimer-only.
-Use sslmode=verify-full and the host's trusted certificate configuration remotely.
+Use scripts/provision_database.py --neon-logins with an administrator connection for initial
+setup. SQL-created login roles get exactly one group each. Configure MIGRATION_DATABASE_URL only
+in the setup/release environment; DATABASE_URL is runtime-only, QUEUE_DATABASE_URL is claimer-only.
+Neon URLs are normalized to psycopg + sslmode=verify-full; a certifi CA bundle is supplied to
+libpq on Windows/Linux unless an explicit sslrootcert is provided. Pooled (-pooler) endpoints
+are rejected for this release; use direct endpoints for all four connections. Small local
+SQLAlchemy pools, pre-ping, recycling and configurable connection timeouts handle idle connections.
+Runtime/queue readiness rejects Neon administrator membership, broad data roles and elevated flags.
 
-Supabase: ensure app is absent from exposed Data API schemas in project settings. The
-migration additionally revokes schema/table access from anon, authenticated and service_role
-when present, enables and forces RLS on every tenant table, and removes public grants/defaults.
-Hosted Supabase settings require a separate hosted smoke check; SQL grants alone do not
-change the dashboard's exposed-schema list. Existing pgvector must live in extensions.
+The app schema lives in Neon, and browsers access it only through FastAPI. Supabase is Auth
+only at present, with optional future private voice storage; no Supabase database URL is used.
+Migrations force tenant RLS and remove public grants/defaults. Supabase-like Data API roles, if
+present, also have direct application grants revoked. Existing pgvector must live in extensions;
+setup fails visibly if it was installed elsewhere rather than relocating it silently.
 
 All app/worker queries must use Database.tenant_transaction(verified_user_uuid). The helper
 validates UUID syntax and sets app.user_id transaction-locally with a bound parameter.
@@ -109,20 +123,22 @@ and source invalidation still belong to later phases.
 uv run ruff check app migrations scripts tests
 uv run pytest -m 'not integration'
 uv run python scripts/smoke_foundation.py
-# Administrator access to a disposable local/CI cluster only, NEVER production:
-$env:TEST_ADMIN_DATABASE_URL = 'postgresql+psycopg://ADMIN:PASSWORD@localhost:5432/postgres'
-uv run pytest
+# After Neon setup (read-only; no model calls):
+uv run python scripts/check_neon.py --live
 ```
 
-Integration tests create uniquely named disposable databases and login roles, then clean up
+CI integration tests create uniquely named disposable databases and login roles, then clean up
 only those resources. They test real pgvector and PostgreSQL, not SQLite. They verify fresh
 and existing upgrades, downgrade/rebuild, all-table no-context reads, same-connection tenant
 reset, cross-user reads/writes/foreign keys, same-user wrong revisions, Unicode evidence,
 vector dimensions, immutable revisions, queue access, Data API role denial, and live Uvicorn
 readiness under restricted credentials. Without TEST_ADMIN_DATABASE_URL they are skipped.
 
-The local Phase 5 verification passed all 84 tests, including isolated PostgreSQL/pgvector
-integration. See docs/implementation-progress.md for details and deployment limits.
+The ordinary CI job uses disposable PostgreSQL/pgvector to exercise database semantics. It is
+test infrastructure, not a database needed on your computer. Do not point TEST_ADMIN_DATABASE_URL
+at an application Neon database: that fixture creates/drops databases and cluster roles and is
+not the hosted smoke procedure. Use a dedicated Neon test branch for hosted acceptance work.
+See docs/implementation-progress.md for historical verification and current deployment limits.
 
 ## Authentication and account API
 

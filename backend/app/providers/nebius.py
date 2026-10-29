@@ -67,6 +67,13 @@ class Nebius:
                     response_format=response_format,
                     max_tokens=settings.model_max_output_tokens,
                     temperature=0,
+                    # Nano 3 reasons by default and can exhaust the entire bounded
+                    # output budget before producing JSON. These structured stages
+                    # use its documented direct-answer mode; older models retain
+                    # their existing request contract.
+                    extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+                    if "nemotron-3-nano" in model.casefold()
+                    else None,
                     # No tools are provided, so dream text cannot invoke tools or change identity.
                 )
                 usage = completion.usage
