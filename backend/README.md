@@ -1,9 +1,10 @@
-# DreamThread backend - Phase 3
+# DreamThread backend - Phase 4
 
 Python 3.12, FastAPI, SQLAlchemy Core, Alembic, PostgreSQL and pgvector.
 This release includes the database foundation, verified authentication, profile/preferences
-endpoints, shared AI quota admission and API contracts. Journal services, job execution and
-model inference arrive in later phases.
+endpoints, shared AI quota admission, and the dream journal API with immutable revisions,
+durable analysis submissions and source invalidation. Worker execution and model inference
+arrive in later phases; saved entries can be used now without a model provider.
 
 ## Local setup
 
@@ -111,7 +112,7 @@ reset, cross-user reads/writes/foreign keys, same-user wrong revisions, Unicode 
 vector dimensions, immutable revisions, queue access, Data API role denial, and live Uvicorn
 readiness under restricted credentials. Without TEST_ADMIN_DATABASE_URL they are skipped.
 
-The local Phase 3 verification passed all 46 tests, including isolated PostgreSQL/pgvector
+The local Phase 4 verification passed all 59 tests, including isolated PostgreSQL/pgvector
 integration. See docs/implementation-progress.md for details and deployment limits.
 
 ## Authentication and account API
@@ -135,6 +136,29 @@ in the same transaction. Idempotent replays return the original resource without
 
 See [the API contract](docs/api-contract.md) for request examples, error codes, shared emotion/
 pagination contracts, quota/idempotency integration, and hosted-auth verification limits.
+
+## Dream journal API
+
+- POST /api/v1/dreams: create draft/saved entry; requires Idempotency-Key. A saved entry returns
+  201 with an analysis_job_id. Drafts do not reserve AI allowance or queue work.
+- GET /api/v1/dreams: cursor pagination and date/emotion/keyword/lifecycle filters.
+- GET/PATCH/DELETE /api/v1/dreams/{id}: source text, versioned changes, immediate source deletion.
+- GET /api/v1/dreams/{id}/revisions/{revision_id}: owned historical source, with is_current flag.
+- POST /api/v1/dreams/{id}/analyze: submit/retry current saved revision; Idempotency-Key and
+  expected_version required; returns a durable job reference with 202.
+- GET /api/v1/dreams/{id}/analysis: current processing state, or valid cached result when ready.
+
+Source text and user-reported emotions are stored exactly in immutable revisions. Content/emotion
+edits create a new revision; title/date changes update metadata and requeue stale analysis.
+No AI request occurs on save. Saving still works when the AI allowance is exhausted: its job
+is queued with waiting_quota and a future run_after. Explicit failed-job retry can return 429.
+Phase 5 must execute/recover jobs and reserve deferred allowance before invoking a provider.
+
+Edits conservatively invalidate all cached AI results for the owner until precise evidence
+dependency traversal exists. User decisions survive reanalysis. Delete removes the source and
+its revisions immediately, clears owner-derived cached content, cancels in-flight jobs and
+increments data_epoch to fence future publishing. The worker must enforce those fences in
+Phase 5. There is no voice upload or generated dream imagery in this phase.
 
 The CI workflow provisions/migrates PostgreSQL, runs tests and builds/smoke-tests the API
 container. Creating the workflow does not mean it has run. Windows Uvicorn must use the

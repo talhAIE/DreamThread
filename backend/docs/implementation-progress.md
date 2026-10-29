@@ -121,3 +121,43 @@ Remaining deployment inputs:
 - AI quotas are an implemented admission primitive. Phase 4/5/11 must call it transactionally
   when they create real resources/jobs; the test-only AI route is not included in production.
 - The disposable loopback PostgreSQL cluster is stopped after verification.
+
+## Phase 4 - October 29, 2026
+
+Implemented:
+
+- All eight planned journal routes: create/list/detail/patch/revision/analyze/analysis/delete.
+- Exact Unicode/whitespace source preservation, SHA256 hashes and immutable emotion/text revisions.
+- Drafts, promotion, optimistic edit conflicts, no-op handling, metadata-only revision preservation.
+- Atomic idempotent source/revision/job writes; no provider call or model availability dependency.
+- Source idempotency separated from AI allowance. Exhaustion defers automatic jobs rather than
+  rejecting a saved dream; explicit failed-job retry remains quota-limited.
+- Per-revision/pipeline/memory job deduplication, retry generations, persisted admission handoff.
+- Owner-only filters, date/UUID cursors, literal keyword and reported-emotion/date filtering.
+- Conservative stale-content invalidation, cleared cached AI text, preserved user decisions,
+  cancelled superseded work, physical source deletion and incremented publication fence epochs.
+- Current-analysis/evidence checks used by list, detail and analysis views.
+- Reuses the Phase 2/3 schema; no database migration is needed.
+
+Verification:
+
+- Ruff passed. Full suite: **59 passed, zero skipped** against the isolated PostgreSQL/pgvector cluster.
+- Concurrent create replay produced one dream, revision and job with one AI reservation.
+- Source text/newlines/emoji/Urdu and SHA256 round-trip exactly; original revisions retain old tags.
+- Date/emotion/keyword filtering and same-date UUID cursor pagination passed.
+- All source routes reject another user's IDs with 404.
+- Conflicting edits produce one success and one 409; no-op edits create no extra revision/job.
+- Simulated queue persistence failure rolls back source/revision/idempotency/quota/job together.
+- Allowance exhaustion still saves a source and persists a future waiting_quota job.
+- Completed-job metadata edits requeue the existing job with a new generation; pipeline changes
+  hide old cached output. Reanalysis preserves confirmed user decisions.
+- Source deletion removes history, cancels jobs, fences publication and clears stale cached text.
+
+Boundaries:
+
+- Worker claiming/execution/recovery and publication fences are Phase 5 work. Phase 4 persists
+  the required state but cannot demonstrate worker crash recovery or late-response rejection yet.
+- Real model extraction/interpretation is Phase 6; no fake output is substituted for queued work.
+- Supabase verification is still mocked at the HTTP adapter boundary in local API tests. Hosted
+  credentials and Docker/CI checks remain deployment inputs, as recorded in earlier phases.
+- The disposable PostgreSQL server is stopped after verification; installed DB services were untouched.
