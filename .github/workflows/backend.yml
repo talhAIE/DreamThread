@@ -24,7 +24,11 @@ jobs:
       run:
         working-directory: backend
     env:
-      TEST_DATABASE_URL: postgresql+psycopg://dreamthread:ci-only-password@localhost:5432/dreamthread_test
+      ADMIN_DATABASE_URL: postgresql+psycopg://dreamthread:ci-only-password@localhost:5432/dreamthread_test
+      TEST_ADMIN_DATABASE_URL: postgresql+psycopg://dreamthread:ci-only-password@localhost:5432/dreamthread_test
+      MIGRATION_DATABASE_URL: postgresql+psycopg://dreamthread_migrator:local-migration-only@localhost:5432/dreamthread_test
+      DATABASE_URL: postgresql+psycopg://dreamthread_app:local-runtime-only@localhost:5432/dreamthread_test
+      EMBEDDING_DIMENSIONS: "3" # Synthetic CI vectors, not a production model setting.
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -32,13 +36,15 @@ jobs:
           version: "0.13.6"
           python-version: "3.12"
       - run: uv sync --locked
+      - run: uv run python scripts/provision_database.py --local-logins
+      - run: uv run alembic upgrade head
       - run: uv run ruff check .
       - run: uv run pytest -q
       - run: docker build -t dreamthread-backend:ci .
       - name: Container liveness and database readiness
         run: |
           docker run -d --name dreamthread-api --network host \
-            -e DATABASE_URL="$TEST_DATABASE_URL" dreamthread-backend:ci
+            -e DATABASE_URL="$DATABASE_URL" -e EMBEDDING_DIMENSIONS=3 dreamthread-backend:ci
           trap 'docker logs dreamthread-api; docker rm -f dreamthread-api' EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://localhost:8000/health/ready; then

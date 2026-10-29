@@ -23,7 +23,8 @@ def main():
     }
     process = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:create_app", "--factory",
-         "--host", "127.0.0.1", "--port", str(port), "--no-access-log"],
+         "--host", "127.0.0.1", "--port", str(port), "--no-access-log",
+         "--loop", "app.loop:create_loop"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     base = f"http://127.0.0.1:{port}"

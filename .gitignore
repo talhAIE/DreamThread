@@ -1,5 +1,6 @@
 backend/.venv/
 backend/.tools/
+backend/pytest-cache-files-*/
 **/__pycache__/
 **/.pytest_cache/
 **/.ruff_cache/
