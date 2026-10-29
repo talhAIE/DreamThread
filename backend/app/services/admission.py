@@ -60,7 +60,13 @@ async def reserve_resource(connection, identity, settings, *, route, key, body):
 async def _reserve(connection, identity, settings, *, route, key, body, units, now, charge):
     if not key or not KEY.fullmatch(key):
         raise APIError("invalid_idempotency_key", "Supply a valid Idempotency-Key", 422)
-    if route not in {"dream.create", "dream.analyze", "analysis.work", "detective.message"}:
+    if route not in {
+        "dream.create",
+        "dream.analyze",
+        "analysis.work",
+        "detective.message",
+        "job.retry",
+    }:
         raise ValueError("Unsupported server-side operation")
     if type(units) is not int or units < 1:
         raise ValueError("Quota units must be positive integers")

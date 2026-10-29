@@ -296,6 +296,8 @@ class JournalService:
             lease_token=None,
             leased_until=None,
             heartbeat_at=None,
+            deadline_at=None,
+            stage_deadline_at=None,
         )
         if existing:
             result = await c.execute(

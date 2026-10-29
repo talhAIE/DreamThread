@@ -144,6 +144,7 @@ def test_production_configuration_accepts_only_complete_secure_settings():
         ("cors_origins", ["http://localhost:3000"]),
         ("expected_schema_revision", "unversioned"),
         ("database_url", URL),
+        ("queue_database_url", URL),
         ("embedding_dimensions", 0),
     ]:
         with pytest.raises(ValidationError):

@@ -1,4 +1,4 @@
-# Phase 4 API contract
+# Phase 5 API contract
 
 All application routes use /api/v1 (configurable API_PREFIX). Health routes remain unversioned.
 The running service publishes /openapi.json and /docs with Bearer authentication and error models.
@@ -212,5 +212,46 @@ the job row. No original text, tokens, provider credentials or reasoning trace e
 GET /dreams/{id}/analysis returns not_requested for drafts, otherwise the processing state
 without invented output. A ready result is exposed only for the current revision/pipeline/
 memory and current linked evidence. Stale output is withheld consistently in list/detail/
-analysis views. Until the Phase 5 worker and Phase 6 inference are implemented, real newly
-submitted jobs remain queued/waiting_quota; this phase does not generate interpretations.
+analysis views. The Phase 5 worker now processes these records. Its default handler reports
+inference_not_implemented after source preparation until Phase 6 supplies real inference;
+it never substitutes a fabricated interpretation.
+
+## Job polling and retry (Phase 5)
+
+GET /api/v1/jobs/{id} returns owned job metadata: id, kind, status, stage, attempts, max_attempts,
+submission, run_after, safe error_code/error_message, retry_allowed, checkpoint_stages and timestamps.
+No payload, credentials, lease token, checkpoint output, or raw provider exception is exposed.
+Another user's job returns 404. A cancelled job remains pollable after its source was deleted.
+
+POST /api/v1/jobs/{id}/retry requires Idempotency-Key and:
+
+```json
+{"expected_attempts":3,"expected_submission":1}
+```
+
+Only failed jobs with a still-current source/revision, dream version, pipeline, memory and epoch
+can retry. Stale state or queued/running/succeeded/cancelled jobs return 409. Missing/other-owned
+jobs return 404. Insufficient allowance returns 429 without altering the failed job. A successful
+retry returns 202, resets attempts to zero, clears the error/lease, increments submission and
+reuses its existing job ID. Same-key replay reports that operation without restarting it again;
+changed body under the key returns 409. Use current GET values for the expected fields.
+
+Worker state: queued -> running -> succeeded, or queued with retry_wait after a retryable failure,
+or failed after permanent failure/exhaustion. Source changes cancel the work. Default three
+automatic attempts are bounded independently from new, quota-limited manual submissions.
+
+Leases use PostgreSQL clock_timestamp, SKIP LOCKED, a fresh token per attempt and an absolute
+deadline. Heartbeats cannot extend an expired token or exceed the attempt deadline. Stage deadlines
+are persisted and monitored separately. Worker shutdown cancels active external calls after its
+drain window; interrupted leases remain reclaimable. Expired exhausted work is finalized by the reaper.
+
+Each checkpoint records a source snapshot hash and references in tenant-private job_artifacts.
+Reuse revalidates all sources. Queue credentials cannot read that table or journal text. Output
+publication, source/epoch validation and success acknowledgement are one database transaction,
+locking account, then sorted source dreams, then the job. No model call runs inside that transaction.
+New dream entries refresh archive coverage at preparation; archive-bound results also reject a
+changed archive at publication. Ordinary local extraction need not restart for an unrelated new entry.
+
+The current analysis handler ends with inference_not_implemented. This is a permanent automatic
+failure and may be manually retried after the real Phase 6 handler is available. No real AI model
+response or semantic evidence verification is claimed by the Phase 5 worker implementation.

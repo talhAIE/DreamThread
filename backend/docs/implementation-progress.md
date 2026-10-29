@@ -161,3 +161,44 @@ Boundaries:
 - Supabase verification is still mocked at the HTTP adapter boundary in local API tests. Hosted
   credentials and Docker/CI checks remain deployment inputs, as recorded in earlier phases.
 - The disposable PostgreSQL server is stopped after verification; installed DB services were untouched.
+
+## Phase 5 - October 29, 2026
+
+Implemented:
+
+- Separate worker CLI/process and narrowly privileged queue connection with startup role checks.
+- SKIP LOCKED claims, unique lease tokens, independent heartbeats, absolute/stage deadlines,
+  bounded attempts, jittered backoff, provider Retry-After classification and safe terminal failures.
+- Tenant-private durable checkpoints with source hashes/version validation and restart reuse.
+- Atomic publication and success acknowledgement; token/expiry/source/pipeline/memory/deletion
+  epoch checks under the same account/source/job locks as source mutation paths.
+- Deferred quota admission before handler work, without charging existing reservations again.
+- GET /jobs/{id}, source-valid failed-job retry with expected counters and request idempotency.
+- Reaper for exhausted/expired jobs, seven-day artifact cleanup and encountered-owner key/quota cleanup.
+- Graceful drain/cancellation with reclaimable leases, Docker worker service and CI CLI smoke step.
+- Migration 0004_worker_checkpoints: private artifacts and narrow deadline-column queue grants.
+
+Verification:
+
+- Ruff passed. Full suite: **84 passed, zero skipped**, with real PostgreSQL 18.4/pgvector.
+- Two workers published once; heartbeat prevented takeover; handler work held no journal DB locks.
+- Killed an actual child process after its persisted checkpoint during a simulated external call;
+  replacement reclaimed its lease and published once. No physical installed database was modified.
+- Old tokens could not heartbeat/publish after takeover. Deletion, source-version, archive-bound,
+  memory, pipeline and data-epoch changes prevented publication.
+- Checkpoints survived a retry and skipped completed synthetic extraction; queue role was denied
+  checkpoint access. Stage timeout and exhausted leases produced bounded recoverable/terminal states.
+- Deferred allowance released the lease without consuming an attempt; later admission was charged once.
+- Reaper purged old private artifacts/expired keys. Owned retry was idempotent and cross-user access denied.
+- Shutdown left a recoverable lease. Standalone worker --once startup passed with separate restricted logins.
+
+Boundaries:
+
+- Production analysis handler intentionally reports inference_not_implemented after preparation.
+  Successful publication tests use clearly synthetic, test-only handlers. Phase 6 owns actual Nemotron
+  calls, quote/meaning validation and atomic evidence persistence.
+- No real provider requests were made. Retry/status behavior was tested with controlled failures;
+  real account/provider capability and hosted Supabase verification remain Phase 0/deployment checks.
+- Docker/hosted CI execution remains unverified locally; configuration is included for later execution.
+- Retention maintenance is job-scoped; complete inactive-account privacy retention is Phase 14 work.
+- The disposable loopback test server is stopped after verification.

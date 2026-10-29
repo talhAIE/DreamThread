@@ -16,10 +16,11 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     api_prefix: str = "/api/v1"
     database_url: SecretStr
+    queue_database_url: SecretStr | None = None
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
     db_pool_size: int = Field(default=3, ge=1, le=20)
     db_timeout_seconds: float = Field(default=3, gt=0, le=30)
-    expected_schema_revision: str = "0003_identity_limits"
+    expected_schema_revision: str = "0004_worker_checkpoints"
     supabase_url: str | None = None
     supabase_publishable_key: SecretStr | None = None
     supabase_secret_key: SecretStr | None = None
@@ -40,6 +41,16 @@ class Settings(BaseSettings):
     max_request_bytes: int = Field(default=131072, ge=1024, le=1048576)
     ai_daily_limit: int = Field(default=100, ge=1, le=10000)
     anonymous_ai_daily_limit: int = Field(default=5, ge=1, le=100)
+    job_lease_seconds: float = Field(default=120, gt=0, le=600)
+    job_heartbeat_seconds: float = Field(default=20, gt=0, le=120)
+    job_stage_timeout_seconds: float = Field(default=90, gt=0, le=1800)
+    job_timeout_seconds: float = Field(default=300, gt=0, le=3600)
+    job_retry_base_seconds: float = Field(default=2, gt=0, le=60)
+    job_retry_max_seconds: float = Field(default=60, gt=0, le=3600)
+    worker_poll_seconds: float = Field(default=1, gt=0, le=30)
+    worker_maintenance_seconds: float = Field(default=30, gt=0, le=300)
+    worker_shutdown_seconds: float = Field(default=10, gt=0, le=60)
+    checkpoint_retention_days: int = Field(default=7, ge=1, le=30)
 
     @field_validator("supabase_url")
     @classmethod
@@ -48,9 +59,11 @@ class Settings(BaseSettings):
             raise ValueError("Supabase URL must be a project origin without an API path")
         return value.rstrip("/") if value else None
 
-    @field_validator("database_url")
+    @field_validator("database_url", "queue_database_url")
     @classmethod
-    def validate_database(cls, value: SecretStr) -> SecretStr:
+    def validate_database(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return value
         try:
             url = make_url(value.get_secret_value())
             if url.drivername != "postgresql+psycopg" or not url.host or not url.database:
@@ -98,6 +111,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def production_requirements(self) -> "Settings":
+        if self.job_heartbeat_seconds >= self.job_lease_seconds / 2:
+            raise ValueError("Job heartbeat must be shorter than half the lease")
+        if self.job_stage_timeout_seconds > self.job_timeout_seconds:
+            raise ValueError("Stage timeout must not exceed the job timeout")
         if self.app_env == "production":
             required = (
                 "supabase_url", "supabase_publishable_key", "nebius_api_key",
@@ -113,6 +130,10 @@ class Settings(BaseSettings):
                 raise ValueError("production CORS origins must use HTTPS")
             if make_url(self.database_url.get_secret_value()).query.get("sslmode") != "verify-full":
                 raise ValueError("production database URL requires sslmode=verify-full")
+            if self.queue_database_url and make_url(
+                self.queue_database_url.get_secret_value()
+            ).query.get("sslmode") != "verify-full":
+                raise ValueError("production queue database URL requires sslmode=verify-full")
         return self
 
     def provider_status(self) -> dict[str, str]:

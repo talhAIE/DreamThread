@@ -28,6 +28,7 @@ jobs:
       TEST_ADMIN_DATABASE_URL: postgresql+psycopg://dreamthread:ci-only-password@localhost:5432/dreamthread_test
       MIGRATION_DATABASE_URL: postgresql+psycopg://dreamthread_migrator:local-migration-only@localhost:5432/dreamthread_test
       DATABASE_URL: postgresql+psycopg://dreamthread_app:local-runtime-only@localhost:5432/dreamthread_test
+      QUEUE_DATABASE_URL: postgresql+psycopg://dreamthread_claimer:local-queue-only@localhost:5432/dreamthread_test
       EMBEDDING_DIMENSIONS: "3" # Synthetic CI vectors, not a production model setting.
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +41,7 @@ jobs:
       - run: uv run alembic upgrade head
       - run: uv run ruff check .
       - run: uv run pytest -q
+      - run: uv run python -m app.workers.main --once
       - run: docker build -t dreamthread-backend:ci .
       - name: Container liveness and database readiness
         run: |

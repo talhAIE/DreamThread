@@ -1,10 +1,11 @@
-# DreamThread backend - Phase 4
+# DreamThread backend - Phase 5
 
 Python 3.12, FastAPI, SQLAlchemy Core, Alembic, PostgreSQL and pgvector.
 This release includes the database foundation, verified authentication, profile/preferences
 endpoints, shared AI quota admission, and the dream journal API with immutable revisions,
-durable analysis submissions and source invalidation. Worker execution and model inference
-arrive in later phases; saved entries can be used now without a model provider.
+durable analysis submissions, source invalidation and a recoverable background worker.
+Model inference arrives in Phase 6; the default worker reports inference_not_implemented
+instead of producing placeholder interpretations.
 
 ## Local setup
 
@@ -86,7 +87,9 @@ and source invalidation still belong to later phases.
   private schema grants, forced RLS, restricted queue leasing and immutable revision trigger.
 - 0002_revision_guard: database evidence source/span validation.
 - 0003_identity_limits: profile/preference versions, verified anonymous status, tenant-isolated
-  AI admission counters. Set EXPECTED_SCHEMA_REVISION=0003_identity_limits in existing .env files.
+  AI admission counters.
+- 0004_worker_checkpoints: lease/stage deadlines and private checkpoint artifacts. Set
+  EXPECTED_SCHEMA_REVISION=0004_worker_checkpoints in existing .env files before starting.
 - app.alembic_version is readable by runtime for readiness; application DDL belongs to owner.
 - schema_v1.py/security_v1.py are frozen snapshots. Future changes use new migrations;
   never edit released snapshots. Runtime tables currently re-export baseline metadata.
@@ -112,7 +115,7 @@ reset, cross-user reads/writes/foreign keys, same-user wrong revisions, Unicode 
 vector dimensions, immutable revisions, queue access, Data API role denial, and live Uvicorn
 readiness under restricted credentials. Without TEST_ADMIN_DATABASE_URL they are skipped.
 
-The local Phase 4 verification passed all 59 tests, including isolated PostgreSQL/pgvector
+The local Phase 5 verification passed all 84 tests, including isolated PostgreSQL/pgvector
 integration. See docs/implementation-progress.md for details and deployment limits.
 
 ## Authentication and account API
@@ -152,13 +155,57 @@ Source text and user-reported emotions are stored exactly in immutable revisions
 edits create a new revision; title/date changes update metadata and requeue stale analysis.
 No AI request occurs on save. Saving still works when the AI allowance is exhausted: its job
 is queued with waiting_quota and a future run_after. Explicit failed-job retry can return 429.
-Phase 5 must execute/recover jobs and reserve deferred allowance before invoking a provider.
+The worker reserves deferred allowance before running its handler.
 
 Edits conservatively invalidate all cached AI results for the owner until precise evidence
 dependency traversal exists. User decisions survive reanalysis. Delete removes the source and
 its revisions immediately, clears owner-derived cached content, cancels in-flight jobs and
 increments data_epoch to fence future publishing. The worker must enforce those fences in
-Phase 5. There is no voice upload or generated dream imagery in this phase.
+the worker. There is no voice upload or generated dream imagery in this phase.
+
+## Durable worker and job status
+
+After administrator provisioning and migration, configure QUEUE_DATABASE_URL from .env.example
+with the separate dreamthread_claimer login. DATABASE_URL remains the tenant-scoped runtime login.
+The queue login must inherit only dreamthread_queue, never owner/runtime privileges. Startup checks
+both connections and schema readiness; there is no administrator/runtime fallback for queue access.
+
+```powershell
+uv run python -m app.workers.main
+# Process one eligible job (or exit idle), useful for setup checks:
+uv run python -m app.workers.main --once
+```
+
+Compose now includes an independent worker service: docker compose up --build -d after host-side
+provisioning/migration. It has no HTTP listener; monitor process health and oldest queued/running
+job age. Docker/hosted CI execution remains a separate deployment check.
+
+Defaults: two concurrent handlers, 120-second lease, 20-second heartbeat, 90-second stage deadline,
+300-second attempt deadline, three automatic attempts, exponential jittered retry starting at
+2 seconds (base capped at 60), and a 30-second reaper. Provider Retry-After can delay retries further.
+Tune using real inference measurements in Phase 6. All timing/retention variables are in .env.example.
+
+GET /api/v1/jobs/{id} returns safe status/stage/attempt/error/checkpoint-name metadata only.
+POST /api/v1/jobs/{id}/retry requires an Idempotency-Key and expected_attempts/expected_submission
+from GET. Only failed owned jobs with current source/pipeline/memory/epoch can restart; otherwise
+use POST /dreams/{id}/analyze on the current source. A new manual retry is quota-limited and increments
+submission; replaying its key does not create another attempt or reservation.
+
+Workers claim with SKIP LOCKED and fresh lease tokens, release DB transactions before handler work,
+renew leases independently, and fence every checkpoint/publication with the token plus current
+source revisions, memory/pipeline and deletion epoch. Success commits with its published result.
+SIGTERM/SIGINT stop new claims; active work drains for ten seconds, then cancellation leaves a
+recoverable lease. Expired attempts can be reclaimed; exhausted ones become visible failures.
+
+Checkpoint outputs live in tenant-private job_artifacts, not queue-readable job payloads. Stage
+reuse verifies hashes and all referenced source versions. Terminal job artifacts are purged after
+seven days; expired idempotency/old quota rows are cleaned for owners encountered in maintenance.
+Full inactive-account retention remains Phase 14 work. Edits/deletion remove owner checkpoints.
+
+The production analysis handler persists a prepared-source metadata checkpoint and then fails
+safely with inference_not_implemented. Tests inject synthetic handlers to exercise publication and
+recovery. Phase 6 must supply the real Nemotron adapter, semantic/quote validation and atomic
+evidence persistence before actual interpretations can be produced.
 
 The CI workflow provisions/migrates PostgreSQL, runs tests and builds/smoke-tests the API
 container. Creating the workflow does not mean it has run. Windows Uvicorn must use the

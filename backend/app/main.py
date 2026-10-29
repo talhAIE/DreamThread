@@ -11,6 +11,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.api.body_limit import BodyLimitMiddleware
 from app.api.dreams import router as dreams_router
+from app.api.jobs import router as jobs_router
 from app.api.me import router as me_router
 from app.auth.identity import SupabaseIdentity
 from app.config import Settings
@@ -73,6 +74,7 @@ def create_app(settings: Settings | None = None, database=None, authenticator=No
     app.add_exception_handler(SQLAlchemyError, database_error)
     app.include_router(me_router, prefix=settings.api_prefix)
     app.include_router(dreams_router, prefix=settings.api_prefix)
+    app.include_router(jobs_router, prefix=settings.api_prefix)
 
     @app.get("/health/live", tags=["Health"])
     async def live():

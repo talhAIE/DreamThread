@@ -1,6 +1,6 @@
 """Conservative cache invalidation until the later evidence dependency engine exists."""
 
-from sqlalchemy import update
+from sqlalchemy import delete, update
 
 from app.db.models import tables
 
@@ -30,6 +30,8 @@ async def invalidate_sources(connection, user_id):
     cached fields unless state is ready and every source revision is current.
     """
     await invalidate_history(connection, user_id)
+    artifacts = tables["app.job_artifacts"]
+    await connection.execute(delete(artifacts).where(artifacts.c.user_id == user_id))
     analyses = tables["app.analyses"]
     await connection.execute(
         update(analyses)
