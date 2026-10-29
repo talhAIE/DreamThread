@@ -34,6 +34,7 @@ class Database:
                 text("SELECT set_config('app.user_id', :user_id, true)"), {"user_id": user_id}
             )
             await connection.execute(text("SET LOCAL search_path TO app, extensions, public"))
+            await connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
             yield connection
 
     async def probe(self) -> str:

@@ -79,3 +79,45 @@ Test environment and remaining deployment checks:
 
 Phase 2 local schema/security acceptance checks are complete. Hosted deployment, authentication,
 inference services and worker execution are subsequent phases, not claims of this implementation.
+
+## Phase 3 - October 29, 2026
+
+Implemented:
+
+- Supabase GET /auth/v1/user verification with project publishable key and bounded HTTP timeout.
+  Missing/invalid/expired/wrong-project credentials fail closed. No unverified JWT/session fallback.
+- Idempotent, transactionally provisioned account and preferences after verified identity; deletion
+  markers are respected. Identity and anonymous status never come from user_metadata or request IDs.
+- GET/PATCH /api/v1/me and /api/v1/me/preferences, optimistic version conflicts, synchronized
+  validated IANA timezones, bounded display names, strict settings fields and UTC responses.
+- Schema migration 0003_identity_limits with version fields and forced-RLS AI admission counters.
+- Atomic per-user daily quota + idempotency service, shared across processes and pools. Request
+  fingerprints/resource IDs persist without raw bodies; quota failures occur before model work.
+- Request byte limits covering chunked bodies, uniform typed error envelopes, Retry-After CORS
+  exposure, bearer OpenAPI contracts, emotion vocabulary and bounded pagination helpers.
+- HTTPX and timezone data are runtime dependencies. API docs and setup notes updated.
+
+Verification:
+
+- Ruff passed. Full pytest suite: **46 passed, zero skipped**.
+- Actual PostgreSQL 18.4/pgvector integration passed upgrades, rollback/rebuild and tenant checks.
+- Eight concurrent first requests produced one profile/preferences pair; A/B settings stay private.
+- Two independent database pools admitted only the configured allowance under concurrent load.
+- Rollback did not consume a reservation; identical-key replay did not invoke the test provider
+  again; altered-body reuse returned 409; exhaustion returned 429 with Retry-After.
+- Rejected identity responses provisioned no rows. Auth network/malformed responses return 503.
+- Auth tests exercise HTTPX MockTransport through the real adapter; invalid/expired/other-project
+  token rejection is simulated at the remote-response boundary, not proven against hosted Supabase.
+- Anonymous gating/isolation, account-deletion markers, stale versions, invalid preferences,
+  unknown identity fields, body/streaming limits and safe errors passed.
+- Real Uvicorn liveness/OpenAPI/database readiness smoke checks remain passing.
+
+Remaining deployment inputs:
+
+- No Supabase credentials were provided. Verify real login, expiration, revocation and a token
+  from another project on the chosen hosted project before deployment.
+- Phase 0 model IDs/dimension and Docker/hosted CI verification remain outstanding as previously
+  recorded. No live NVIDIA model calls are part of this phase.
+- AI quotas are an implemented admission primitive. Phase 4/5/11 must call it transactionally
+  when they create real resources/jobs; the test-only AI route is not included in production.
+- The disposable loopback PostgreSQL cluster is stopped after verification.

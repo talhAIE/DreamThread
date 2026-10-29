@@ -15,6 +15,16 @@ logger = logging.getLogger("dreamthread")
 REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+class APIError(Exception):
+    def __init__(self, code: str, message: str, status: int, *, headers=None):
+        self.code, self.message, self.status, self.headers = code, message, status, headers
+
+
+async def api_error(request: Request, exc: APIError):
+    return error_response(exc.code, exc.message, request.state.request_id,
+                          exc.status, headers=exc.headers)
+
+
 def error_response(code, message, request_id, status_code, details=None, headers=None):
     return JSONResponse(
         {"error": {"code": code, "message": message, "request_id": request_id,

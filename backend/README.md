@@ -1,8 +1,9 @@
-# DreamThread backend - Phase 2
+# DreamThread backend - Phase 3
 
 Python 3.12, FastAPI, SQLAlchemy Core, Alembic, PostgreSQL and pgvector.
-This release includes the database foundation and security boundaries. Auth endpoints,
-journal services, job execution and model inference arrive in later phases.
+This release includes the database foundation, verified authentication, profile/preferences
+endpoints, shared AI quota admission and API contracts. Journal services, job execution and
+model inference arrive in later phases.
 
 ## Local setup
 
@@ -83,6 +84,8 @@ and source invalidation still belong to later phases.
 - 0001_core: 32 application/configuration tables, vector(D), indexes, composite foreign keys,
   private schema grants, forced RLS, restricted queue leasing and immutable revision trigger.
 - 0002_revision_guard: database evidence source/span validation.
+- 0003_identity_limits: profile/preference versions, verified anonymous status, tenant-isolated
+  AI admission counters. Set EXPECTED_SCHEMA_REVISION=0003_identity_limits in existing .env files.
 - app.alembic_version is readable by runtime for readiness; application DDL belongs to owner.
 - schema_v1.py/security_v1.py are frozen snapshots. Future changes use new migrations;
   never edit released snapshots. Runtime tables currently re-export baseline metadata.
@@ -108,8 +111,30 @@ reset, cross-user reads/writes/foreign keys, same-user wrong revisions, Unicode 
 vector dimensions, immutable revisions, queue access, Data API role denial, and live Uvicorn
 readiness under restricted credentials. Without TEST_ADMIN_DATABASE_URL they are skipped.
 
-The local Phase 2 verification passed all 22 tests against an isolated PostgreSQL/pgvector
-cluster. See docs/implementation-progress.md for environment details and deployment limits.
+The local Phase 3 verification passed all 46 tests, including isolated PostgreSQL/pgvector
+integration. See docs/implementation-progress.md for details and deployment limits.
+
+## Authentication and account API
+
+Configure SUPABASE_URL as your project's HTTPS origin and SUPABASE_PUBLISHABLE_KEY in your
+private .env. The frontend handles Supabase sign-up, login and refresh, then supplies the
+access token in Authorization: Bearer. Backend verification always calls that project's
+Auth /auth/v1/user endpoint; no local JWT-decoding shortcut or development bypass exists.
+
+The protected endpoints are GET/PATCH /api/v1/me and GET/PATCH /api/v1/me/preferences.
+PATCH requires expected_version and at least one changed field. Profiles/preferences are
+provisioned atomically only after identity verification. UTC is the initial timezone.
+Anonymous Auth users require DEMO_ENABLED=true. Never pass a service/admin key as a user token.
+
+Defaults: a 5-second Auth timeout, 131072-byte request body limit, 100 AI admission units per
+regular user per UTC day and 5 for an anonymous user. Environment names are in .env.example.
+These limits are shared through PostgreSQL, not in-memory counters. reserve_ai is an internal
+transactional service for future AI endpoints; no model call or artificial AI endpoint is
+exposed in this phase. Subsequent resource/job creation must use its returned ID and commit
+in the same transaction. Idempotent replays return the original resource without new work.
+
+See [the API contract](docs/api-contract.md) for request examples, error codes, shared emotion/
+pagination contracts, quota/idempotency integration, and hosted-auth verification limits.
 
 The CI workflow provisions/migrates PostgreSQL, runs tests and builds/smoke-tests the API
 container. Creating the workflow does not mean it has run. Windows Uvicorn must use the

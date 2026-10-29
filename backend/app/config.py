@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
     db_pool_size: int = Field(default=3, ge=1, le=20)
     db_timeout_seconds: float = Field(default=3, gt=0, le=30)
-    expected_schema_revision: str = "0002_revision_guard"
+    expected_schema_revision: str = "0003_identity_limits"
     supabase_url: str | None = None
     supabase_publishable_key: SecretStr | None = None
     supabase_secret_key: SecretStr | None = None
@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     model_timeout_seconds: int = Field(default=60, gt=0, le=600)
     job_max_attempts: int = Field(default=3, ge=1, le=10)
     worker_concurrency: int = Field(default=2, ge=1, le=16)
+    auth_timeout_seconds: float = Field(default=5, gt=0, le=30)
+    max_request_bytes: int = Field(default=131072, ge=1024, le=1048576)
+    ai_daily_limit: int = Field(default=100, ge=1, le=10000)
+    anonymous_ai_daily_limit: int = Field(default=5, ge=1, le=100)
+
+    @field_validator("supabase_url")
+    @classmethod
+    def validate_auth_origin(cls, value: str | None) -> str | None:
+        if value and urlsplit(value).path not in {"", "/"}:
+            raise ValueError("Supabase URL must be a project origin without an API path")
+        return value.rstrip("/") if value else None
 
     @field_validator("database_url")
     @classmethod

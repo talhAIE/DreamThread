@@ -19,7 +19,7 @@ services:
     environment:
       APP_ENV: development
       DATABASE_URL: postgresql+psycopg://dreamthread_app:local-runtime-only@db:5432/dreamthread
-      EXPECTED_SCHEMA_REVISION: 0002_revision_guard
+      EXPECTED_SCHEMA_REVISION: 0003_identity_limits
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-0}
       CORS_ORIGINS: '["http://localhost:3000"]'
     ports:
