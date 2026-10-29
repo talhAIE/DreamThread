@@ -13,6 +13,7 @@ from app.auth.identity import Identity
 from app.db.models import tables
 from app.errors import APIError
 from app.services.admission import reserve_ai
+from app.services.evidence import OutputInvalid, verify_citation
 from app.services.journal import pipeline_version
 from app.workers.types import (
     LeaseLost,
@@ -318,8 +319,64 @@ class Store:
                 archive_bound=execution.archive_bound or publication.archive_bound,
             )
             await self.check_hashes(c, refs)
+            records = publication.evidence
+            if len({item.id for item in records}) != len(records):
+                raise WorkFailure("invalid_output")
+            if publication.require_evidence:
+                ids = {str(item.id) for item in records}
+                claims = values["extraction"].get("observations", []) + values["reflections"]
+                if (
+                    not records
+                    or not claims
+                    or any(
+                        not claim.get("evidence_ids")
+                        or not set(claim["evidence_ids"]).issubset(ids)
+                        for claim in claims
+                    )
+                ):
+                    raise WorkFailure("invalid_output")
+            evidence_table, links = tables["app.evidence"], tables["app.analysis_evidence"]
+            for item in records:
+                ref = next(
+                    (
+                        s
+                        for s in refs
+                        if s.dream_id == item.dream_id and s.revision_id == item.revision_id
+                    ),
+                    None,
+                )
+                if ref is None:
+                    raise WorkFailure("invalid_output")
+                source_text = await c.scalar(
+                    select(R.c.text).where(
+                        R.c.id == ref.revision_id,
+                        R.c.dream_id == ref.dream_id,
+                    )
+                )
+                try:
+                    verified = verify_citation(
+                        item,
+                        dream_id=ref.dream_id,
+                        revision_id=ref.revision_id,
+                        source_hash=ref.content_hash,
+                        text=source_text,
+                    )
+                except OutputInvalid:
+                    raise WorkFailure("invalid_output") from None
+                await c.execute(
+                    insert(evidence_table).values(
+                        id=item.id,
+                        user_id=current["user_id"],
+                        dream_id=verified.dream_id,
+                        revision_id=verified.revision_id,
+                        start=verified.start,
+                        end=verified.end,
+                        exact_quote=verified.quote,
+                        content_hash=verified.source_hash,
+                    )
+                )
             values.update(state="ready")
-            await c.execute(
+            analysis_id = await c.scalar(
                 insert(ANALYSES)
                 .values(
                     user_id=current["user_id"],
@@ -338,7 +395,15 @@ class Store:
                     ],
                     set_=values,
                 )
+                .returning(ANALYSES.c.id)
             )
+            await c.execute(delete(links).where(links.c.analysis_id == analysis_id))
+            for item in records:
+                await c.execute(
+                    insert(links).values(
+                        user_id=current["user_id"], analysis_id=analysis_id, evidence_id=item.id
+                    )
+                )
             await c.execute(update(D).where(D.c.id == dream["id"]).values(analysis_state="ready"))
             # Success and publication are one commit; no pre-commit acknowledgement.
             await c.execute(
@@ -477,3 +542,30 @@ class Execution:
 
     async def load_checkpoint(self, stage):
         return await self.store.load_checkpoint(self, stage)
+
+    async def record_call(self, **metadata):
+        async with self.store.locked(self.job, self.sources) as (c, account, dreams, current, _):
+            self.store.guard(account, dreams, current, self.sources)
+            return await c.scalar(
+                insert(tables["app.model_runs"])
+                .values(
+                    user_id=current["user_id"],
+                    job_id=current["id"],
+                    prompt_version=self.store.settings.prompt_version,
+                    trace_stage=metadata["task"],
+                    **metadata,
+                )
+                .returning(tables["app.model_runs"].c.id)
+            )
+
+    async def mark_call(self, run_id, status):
+        if status not in {"validated", "invalid_output"}:
+            raise ValueError("Invalid model-run status")
+        async with self.store.locked(self.job, self.sources) as (c, account, dreams, current, _):
+            self.store.guard(account, dreams, current, self.sources)
+            runs = tables["app.model_runs"]
+            await c.execute(
+                update(runs)
+                .where(runs.c.id == run_id, runs.c.job_id == current["id"])
+                .values(status=status)
+            )

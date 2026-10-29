@@ -1,21 +1,15 @@
-"""Production registry. Phase 6 will replace the unavailable inference stage."""
+"""Production single-entry Nemotron extraction/reflection registry."""
 
-from app.workers.types import WorkFailure
+from app.services.extraction import ExtractionPipeline
 
 
 class AnalysisHandler:
+    def __init__(self, settings, provider=None):
+        self.pipeline = ExtractionPipeline(settings, provider)
+
     async def run(self, execution):
-        if await execution.load_checkpoint("prepared") is None:
-            await execution.checkpoint(
-                "prepared",
-                {
-                    "revision_id": str(execution.primary.revision_id),
-                    "content_hash": execution.primary.content_hash,
-                },
-            )
-        # Deliberate terminal state, not a placeholder interpretation or fake success.
-        raise WorkFailure("inference_not_implemented")
+        return await self.pipeline.run(execution)
 
 
-def default_handlers():
-    return {"analysis": AnalysisHandler()}
+def default_handlers(settings):
+    return {"analysis": AnalysisHandler(settings)}

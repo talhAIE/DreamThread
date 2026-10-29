@@ -212,9 +212,8 @@ the job row. No original text, tokens, provider credentials or reasoning trace e
 GET /dreams/{id}/analysis returns not_requested for drafts, otherwise the processing state
 without invented output. A ready result is exposed only for the current revision/pipeline/
 memory and current linked evidence. Stale output is withheld consistently in list/detail/
-analysis views. The Phase 5 worker now processes these records. Its default handler reports
-inference_not_implemented after source preparation until Phase 6 supplies real inference;
-it never substitutes a fabricated interpretation.
+analysis views. The worker processes these records through the Phase 6 Nemotron pipeline.
+Missing credentials produce provider_not_configured; no fabricated interpretation is substituted.
 
 ## Job polling and retry (Phase 5)
 
@@ -252,6 +251,30 @@ locking account, then sorted source dreams, then the job. No model call runs ins
 New dream entries refresh archive coverage at preparation; archive-bound results also reject a
 changed archive at publication. Ordinary local extraction need not restart for an unrelated new entry.
 
-The current analysis handler ends with inference_not_implemented. This is a permanent automatic
-failure and may be manually retried after the real Phase 6 handler is available. No real AI model
-response or semantic evidence verification is claimed by the Phase 5 worker implementation.
+## Single-entry analysis and evidence (Phase 6)
+
+A ready analysis includes observations, original reported_emotions, 1-3 possible_reflections,
+an optional followup_question and evidence. Each observation/reflection carries evidence_ids
+allocated by the application after source verification. Reflections have kind=tentative_reflection.
+An evidence record contains id, dream_id, revision_id, source_hash, start, end and quote.
+Offsets are zero-based Python Unicode code points, end exclusive; JavaScript highlighting must
+convert from UTF-16 indices appropriately. Display the returned exact quote.
+
+The application verifies owned source IDs, the current revision and SHA256, then compares the
+exact source slice. Incorrect offsets are repaired only when the quote occurs once. Ambiguous
+or invented spans, unknown observation keys and malformed schema are rejected. One repair is
+shared between extraction and reflection per submission; invalid output after that fails honestly.
+This means two normal successful calls, with at most one additional validation-repair call;
+transient network failures can trigger separately bounded worker attempts.
+
+Label/source and conservative negation checks support observations; tentative-language guards
+reject common diagnosis, prophecy and invented recurrence wording. These guards are heuristic,
+not a proof that every reflection is meaningful. Model observations never overwrite user mood tags.
+The single-entry pipeline makes no claim to identify recurring motifs across an archive.
+
+Validated stage checkpoints are revalidated on reuse. Evidence and analysis links, final source/
+lease checks and job success are atomic. Provider/model/prompt version, latency, nullable usage
+and result status are private telemetry; raw provider responses and hidden reasoning are not stored.
+Safe provider failures include provider_not_configured, provider_configuration and
+provider_input_too_large. Fix configuration before a manual retry; use /dreams/{id}/analyze when
+the pipeline fingerprint changed. Live account capability verification remains pending credentials.

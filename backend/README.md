@@ -1,11 +1,12 @@
-# DreamThread backend - Phase 5
+# DreamThread backend - Phase 6
 
 Python 3.12, FastAPI, SQLAlchemy Core, Alembic, PostgreSQL and pgvector.
 This release includes the database foundation, verified authentication, profile/preferences
 endpoints, shared AI quota admission, and the dream journal API with immutable revisions,
 durable analysis submissions, source invalidation and a recoverable background worker.
-Model inference arrives in Phase 6; the default worker reports inference_not_implemented
-instead of producing placeholder interpretations.
+The worker now calls NVIDIA Nemotron through Nebius for extraction and tentative reflections,
+verifies source quotes, and publishes linked evidence atomically. Live account verification is
+pending the user's credentials; local tests use controlled provider responses.
 
 ## Local setup
 
@@ -202,14 +203,54 @@ reuse verifies hashes and all referenced source versions. Terminal job artifacts
 seven days; expired idempotency/old quota rows are cleaned for owners encountered in maintenance.
 Full inactive-account retention remains Phase 14 work. Edits/deletion remove owner checkpoints.
 
-The production analysis handler persists a prepared-source metadata checkpoint and then fails
-safely with inference_not_implemented. Tests inject synthetic handlers to exercise publication and
-recovery. Phase 6 must supply the real Nemotron adapter, semantic/quote validation and atomic
-evidence persistence before actual interpretations can be produced.
+The production analysis handler uses the Phase 6 provider pipeline described below. Without
+credentials it fails safely with provider_not_configured and produces no interpretation.
 
 The CI workflow provisions/migrates PostgreSQL, runs tests and builds/smoke-tests the API
 container. Creating the workflow does not mean it has run. Windows Uvicorn must use the
 supplied selector-loop factory for psycopg async compatibility; Linux can use it too.
+
+## Nemotron extraction and reflections
+
+Set NEBIUS_API_KEY and NEBIUS_EXTRACTION_MODEL in your private backend/.env. Use the exact
+available NVIDIA Nemotron ID from your Nebius account catalog; no model ID is guessed or
+automatically substituted. Both single-entry stages use this model. NEBIUS_REASONING_MODEL
+is reserved for later cross-entry reasoning. Compose passes these server-side settings to
+both API and worker; never put the key in frontend environment variables.
+
+NEBIUS_OUTPUT_MODE=json_object is the default. json_schema is an explicit option to verify
+against your chosen model; unsupported modes fail visibly without a silent fallback. Output
+is capped by MODEL_MAX_OUTPUT_TOKENS. A conservative UTF-8 byte bound (including schema,
+output allowance and overhead) rejects oversized context before sending it; text is never
+silently truncated. Set MODEL_CONTEXT_TOKEN_BUDGET within the selected model's supported limit.
+
+Extraction and reflection have separate versioned prompts in app/prompts. PROMPT_VERSION=v1
+must correspond to existing templates. Continuity and Detective prompts are reserved for
+later phases. Dream content is untrusted data, with no tools available to the model.
+
+Schema/source/quote checks allow one shared repair across both stages per submission.
+Validated checkpoints survive transient retries. Explicitly reported mood tags retain their
+original values; model emotion observations and tentative reflections are separate fields.
+Exact citations prove where text occurred, not the psychological validity of an interpretation.
+Conservative negation/wording guards are heuristic and currently English-focused.
+
+Analysis, verified evidence links and job success commit in one tenant-scoped transaction.
+Provider metadata records requested model, prompt version, latency, status and nullable token
+usage. Raw provider output and hidden reasoning are not persisted. Validated structured stage
+outputs are private checkpoints, covered by worker retention and source invalidation.
+
+After configuring credentials, explicitly run this potentially billable synthetic-source check:
+
+```powershell
+uv run python scripts/probe_inference.py --live
+```
+
+It confirms catalog membership, runs the production extraction/reflection validators and prints
+metadata only. This live check has **not** been run; the user deferred it until keys are ready.
+See [capability status](docs/model-capabilities.md). Then run the API/worker and save a dream,
+poll its job, and retrieve /api/v1/dreams/{id}/analysis for the complete database-backed flow.
+Phase 6 changes the pipeline fingerprint; analyze the current dream again if an older job is stale.
+The database head remains 0004_worker_checkpoints; no Phase 6 migration is needed.
 
 ## Configuration and observability
 

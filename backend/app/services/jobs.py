@@ -9,6 +9,9 @@ from app.services.journal import JournalService, pipeline_version
 
 J, D, ART = tables["app.jobs"], tables["app.dreams"], tables["app.job_artifacts"]
 ERRORS = {
+    "provider_not_configured": "Configure the Nebius API key and NVIDIA Nemotron model.",
+    "provider_configuration": "Select an available NVIDIA Nemotron model in server configuration.",
+    "provider_input_too_large": "The entry exceeds the configured model context allowance.",
     "inference_not_implemented": "Analysis inference will be available after the inference phase.",
     "provider_auth_failed": "The inference service configuration needs attention.",
     "invalid_output": "The inference response could not be validated.",

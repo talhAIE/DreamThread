@@ -73,7 +73,7 @@ async def expire(db, user, job_id):
         )
 
 
-def test_default_handler_reports_unimplemented_inference_without_fake_output(cluster):
+def test_default_handler_reports_unconfigured_inference_without_fake_output(cluster):
     async def check():
         user = uuid4()
         async with worker_session(cluster) as (client, _, _, _, worker):
@@ -83,7 +83,7 @@ def test_default_handler_reports_unimplemented_inference_without_fake_output(clu
                 await client.get(f"/api/v1/jobs/{dream['analysis_job_id']}", headers=token(user))
             ).json()
             assert job["status"] == "failed"
-            assert job["error_code"] == "inference_not_implemented"
+            assert job["error_code"] == "provider_not_configured"
             assert job["checkpoint_stages"] == ["prepared"]
             assert job["retry_allowed"]
             assert "payload" not in job and "lease_token" not in job

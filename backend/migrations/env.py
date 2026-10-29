@@ -8,7 +8,6 @@ from sqlalchemy import create_engine, pool, text
 
 from app.db.models import metadata
 
-load_dotenv()
 config = context.config
 
 
@@ -29,6 +28,7 @@ if context.is_offline_mode():
 elif config.attributes.get("connection") is not None:
     run(config.attributes["connection"])
 else:
+    load_dotenv()
     url = os.environ.get("MIGRATION_DATABASE_URL")
     if not url:
         raise RuntimeError("MIGRATION_DATABASE_URL is required; runtime URL is never a fallback")

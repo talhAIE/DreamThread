@@ -1,3 +1,16 @@
+x-inference-environment: &inference_environment
+  NEBIUS_BASE_URL: ${NEBIUS_BASE_URL:-https://api.tokenfactory.nebius.com/v1/}
+  NEBIUS_API_KEY: ${NEBIUS_API_KEY:-}
+  NEBIUS_EXTRACTION_MODEL: ${NEBIUS_EXTRACTION_MODEL:-}
+  NEBIUS_REASONING_MODEL: ${NEBIUS_REASONING_MODEL:-}
+  NEBIUS_EMBEDDING_MODEL: ${NEBIUS_EMBEDDING_MODEL:-}
+  NEBIUS_OUTPUT_MODE: ${NEBIUS_OUTPUT_MODE:-json_object}
+  PROMPT_VERSION: ${PROMPT_VERSION:-v1}
+  EMBEDDING_VERSION: ${EMBEDDING_VERSION:-v1}
+  MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-60}
+  MODEL_MAX_OUTPUT_TOKENS: ${MODEL_MAX_OUTPUT_TOKENS:-2048}
+  MODEL_CONTEXT_TOKEN_BUDGET: ${MODEL_CONTEXT_TOKEN_BUDGET:-32768}
+
 services:
   db:
     image: pgvector/pgvector:0.8.0-pg16
@@ -17,6 +30,9 @@ services:
   api:
     build: .
     environment:
+      <<: *inference_environment
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
       APP_ENV: development
       DATABASE_URL: postgresql+psycopg://dreamthread_app:local-runtime-only@db:5432/dreamthread
       EXPECTED_SCHEMA_REVISION: 0004_worker_checkpoints
@@ -31,6 +47,7 @@ services:
     build: .
     command: ["/srv/.venv/bin/python", "-m", "app.workers.main"]
     environment:
+      <<: *inference_environment
       APP_ENV: development
       DATABASE_URL: postgresql+psycopg://dreamthread_app:local-runtime-only@db:5432/dreamthread
       QUEUE_DATABASE_URL: postgresql+psycopg://dreamthread_claimer:local-queue-only@db:5432/dreamthread

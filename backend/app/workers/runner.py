@@ -14,7 +14,7 @@ class Worker:
     def __init__(self, settings, db, queue, handlers=None):
         self.settings, self.queue = settings, queue
         self.store = Store(db, settings)
-        self.handlers = default_handlers() if handlers is None else handlers
+        self.handlers = default_handlers(settings) if handlers is None else handlers
 
     async def _execute(self, job, state):
         execution = await self.store.prepare(job)

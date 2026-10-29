@@ -202,3 +202,42 @@ Boundaries:
 - Docker/hosted CI execution remains unverified locally; configuration is included for later execution.
 - Retention maintenance is job-scoped; complete inactive-account privacy retention is Phase 14 work.
 - The disposable loopback test server is stopped after verification.
+
+## Phase 6 - October 29, 2026
+
+Implemented:
+
+- OpenAI-compatible Nebius SDK adapter targeting a configured NVIDIA Nemotron model; SDK
+  retries disabled so the durable worker owns retries, timeouts and Retry-After handling.
+- Explicit JSON object/JSON schema modes, output caps and conservative context size guard.
+- Separate versioned extraction/reflection prompts; reserved continuity/Detective templates.
+- Strict structured output, exact owned source/revision/hash/quote checks, deterministic unique
+  offset correction, and one persisted repair allowance shared across stages per submission.
+- Separate observations, unchanged user mood tags, 1-3 tentative reflections and optional question.
+- Application-assigned evidence IDs with evidence/analysis links and success in one transaction.
+- Private provider/model/prompt/latency/nullable usage/status telemetry, without raw responses
+  or hidden reasoning. Validated checkpoints support retry without repeating completed calls.
+- Analysis API returns linked evidence; configuration examples, Compose settings and opt-in
+  metadata-only live probe are included. No schema migration is required (head remains 0004).
+
+Verification:
+
+- Ruff passed. Full suite: **106 passed, zero skipped**, including real PostgreSQL/pgvector
+  and real SDK requests through controlled HTTPX transport responses.
+- Valid extraction/reflection publishes evidence and job success atomically; simulated link
+  persistence failure rolls back publication, and retry reuses validated stage checkpoints.
+- Fabricated/foreign IDs, incorrect hashes, invented/ambiguous quotes, invalid structure,
+  negations, truncation and unsupported model configuration are rejected in fixtures.
+- Injection fixtures cannot change the requested model, tool availability or output contract.
+- Unicode offset repair, positive emotion after negation, shared repair exhaustion, context
+  rejection and provider rate limits are covered. Original mood tags remain unchanged.
+- Live Uvicorn/OpenAPI/request-ID/database-unavailable smoke check passed. Probe --help passed.
+
+Remaining gate and limits:
+
+- **Live Nemotron verification is pending credentials.** The user explicitly requested completing
+  development before configuring keys. No real provider requests were made. Run the documented
+  --live probe, then verify a saved dream through the API/worker when credentials are available.
+- Quote checks verify source fidelity; wording/negation guards are English-focused heuristics,
+  not a guarantee of psychological interpretation quality or universal injection resistance.
+- Docker/hosted CI and hosted Supabase account checks remain deployment verification tasks.

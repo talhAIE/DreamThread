@@ -10,6 +10,8 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.schemas.analysis import VerifiedEvidence
+
 
 class LeaseLost(Exception):
     pass
@@ -32,6 +34,9 @@ class WorkFailure(Exception):
             "internal_error",
             "unsupported_job",
             "stage_timeout",
+            "provider_not_configured",
+            "provider_configuration",
+            "provider_input_too_large",
         }
         self.code = code if code in allowed else "internal_error"
         self.retryable, self.retry_after = retryable, retry_after
@@ -71,6 +76,8 @@ class Publication:
     analysis: AnalysisPayload
     sources: tuple[SourceRef, ...] = ()
     archive_bound: bool = False
+    evidence: tuple[VerifiedEvidence, ...] = ()
+    require_evidence: bool = False
 
 
 def snapshot_hash(job, sources, archive_bound):

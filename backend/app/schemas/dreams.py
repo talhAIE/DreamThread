@@ -141,3 +141,4 @@ class AnalysisResult(Contract):
     extraction: dict | None = None
     reflections: list | None = None
     followup: str | None = None
+    evidence: list[dict] | None = None

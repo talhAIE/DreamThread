@@ -30,11 +30,14 @@ ANALYSES = tables["app.analyses"]
 
 def pipeline_version(settings):
     values = [
+        "single-entry-evidence-v1",
         settings.prompt_version,
         settings.embedding_version,
         settings.nebius_extraction_model,
         settings.nebius_reasoning_model,
         settings.nebius_embedding_model,
+        settings.nebius_output_mode,
+        settings.model_max_output_tokens,
     ]
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()[:32]
 
@@ -598,6 +601,25 @@ class JournalService:
                 return result
             analysis = await self._current_analysis(c, dream)
             if analysis:
+                evidence, links = tables["app.evidence"], tables["app.analysis_evidence"]
+                rows = (
+                    (
+                        await c.execute(
+                            select(evidence)
+                            .join(
+                                links,
+                                and_(
+                                    links.c.user_id == evidence.c.user_id,
+                                    links.c.evidence_id == evidence.c.id,
+                                ),
+                            )
+                            .where(links.c.analysis_id == analysis["id"])
+                            .order_by(evidence.c.dream_id, evidence.c.start, evidence.c.id)
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
                 return result.model_copy(
                     update=dict(
                         status="ready",
@@ -605,6 +627,18 @@ class JournalService:
                         extraction=analysis["extraction"],
                         reflections=analysis["reflections"],
                         followup=analysis["followup"],
+                        evidence=[
+                            {
+                                "id": row["id"],
+                                "dream_id": row["dream_id"],
+                                "revision_id": row["revision_id"],
+                                "start": row["start"],
+                                "end": row["end"],
+                                "quote": row["exact_quote"],
+                                "source_hash": row["content_hash"],
+                            }
+                            for row in rows
+                        ],
                     )
                 )
             return result

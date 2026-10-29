@@ -26,15 +26,18 @@ class Settings(BaseSettings):
     supabase_secret_key: SecretStr | None = None
     nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
     nebius_api_key: SecretStr | None = None
-    nebius_extraction_model: str | None = None
-    nebius_reasoning_model: str | None = None
-    nebius_embedding_model: str | None = None
+    nebius_extraction_model: str | None = Field(default=None, min_length=1, max_length=200)
+    nebius_reasoning_model: str | None = Field(default=None, min_length=1, max_length=200)
+    nebius_embedding_model: str | None = Field(default=None, min_length=1, max_length=200)
     embedding_dimensions: int | None = Field(default=None, gt=0)
-    embedding_version: str = "v1"
-    prompt_version: str = "v1"
+    embedding_version: str = Field(default="v1", min_length=1, max_length=50)
+    prompt_version: str = Field(default="v1", min_length=1, max_length=50)
     voice_enabled: bool = False
     demo_enabled: bool = False
     model_timeout_seconds: int = Field(default=60, gt=0, le=600)
+    nebius_output_mode: Literal["json_object", "json_schema"] = "json_object"
+    model_max_output_tokens: int = Field(default=2048, ge=256, le=8192)
+    model_context_token_budget: int = Field(default=32768, ge=4096, le=262144)
     job_max_attempts: int = Field(default=3, ge=1, le=10)
     worker_concurrency: int = Field(default=2, ge=1, le=16)
     auth_timeout_seconds: float = Field(default=5, gt=0, le=30)
@@ -51,6 +54,19 @@ class Settings(BaseSettings):
     worker_maintenance_seconds: float = Field(default=30, gt=0, le=300)
     worker_shutdown_seconds: float = Field(default=10, gt=0, le=60)
     checkpoint_retention_days: int = Field(default=7, ge=1, le=30)
+
+    @field_validator(
+        "nebius_api_key",
+        "nebius_extraction_model",
+        "nebius_reasoning_model",
+        "nebius_embedding_model",
+        "supabase_publishable_key",
+        "supabase_secret_key",
+        mode="before",
+    )
+    @classmethod
+    def empty_optional_setting(cls, value):
+        return None if value == "" else value
 
     @field_validator("supabase_url")
     @classmethod
@@ -103,8 +119,12 @@ class Settings(BaseSettings):
             return value
         parsed = urlsplit(value)
         if (
-            parsed.scheme != "https" or not parsed.hostname or parsed.username
-            or parsed.password or parsed.query or parsed.fragment
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
         ):
             raise ValueError("must be an HTTPS service URL without credentials or query")
         return value
@@ -117,9 +137,13 @@ class Settings(BaseSettings):
             raise ValueError("Stage timeout must not exceed the job timeout")
         if self.app_env == "production":
             required = (
-                "supabase_url", "supabase_publishable_key", "nebius_api_key",
-                "nebius_extraction_model", "nebius_reasoning_model",
-                "nebius_embedding_model", "embedding_dimensions",
+                "supabase_url",
+                "supabase_publishable_key",
+                "nebius_api_key",
+                "nebius_extraction_model",
+                "nebius_reasoning_model",
+                "nebius_embedding_model",
+                "embedding_dimensions",
             )
             missing = [name for name in required if not getattr(self, name)]
             if missing:
@@ -130,24 +154,35 @@ class Settings(BaseSettings):
                 raise ValueError("production CORS origins must use HTTPS")
             if make_url(self.database_url.get_secret_value()).query.get("sslmode") != "verify-full":
                 raise ValueError("production database URL requires sslmode=verify-full")
-            if self.queue_database_url and make_url(
-                self.queue_database_url.get_secret_value()
-            ).query.get("sslmode") != "verify-full":
+            if (
+                self.queue_database_url
+                and make_url(self.queue_database_url.get_secret_value()).query.get("sslmode")
+                != "verify-full"
+            ):
                 raise ValueError("production queue database URL requires sslmode=verify-full")
         return self
 
     def provider_status(self) -> dict[str, str]:
-        inference = all((
-            self.nebius_api_key, self.nebius_extraction_model, self.nebius_reasoning_model,
-        ))
-        embeddings = all((
-            self.nebius_api_key, self.nebius_embedding_model, self.embedding_dimensions,
-        ))
+        inference = all(
+            (
+                self.nebius_api_key,
+                self.nebius_extraction_model,
+                self.nebius_reasoning_model,
+            )
+        )
+        embeddings = all(
+            (
+                self.nebius_api_key,
+                self.nebius_embedding_model,
+                self.embedding_dimensions,
+            )
+        )
         return {
             "nebius_inference": "configured_unverified" if inference else "not_configured",
             "embeddings": "configured_unverified" if embeddings else "not_configured",
             "supabase_auth": (
                 "configured_unverified"
-                if self.supabase_url and self.supabase_publishable_key else "not_configured"
+                if self.supabase_url and self.supabase_publishable_key
+                else "not_configured"
             ),
         }
