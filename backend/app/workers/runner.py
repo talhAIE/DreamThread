@@ -3,6 +3,7 @@
 import asyncio
 import logging
 
+from app.services.indexing import EmbeddingPublication
 from app.workers.handlers import default_handlers
 from app.workers.store import Store
 from app.workers.types import LeaseLost, Publication, SourceChanged, WorkFailure, classify
@@ -26,7 +27,7 @@ class Worker:
             raise WorkFailure("unsupported_job")
         async with asyncio.timeout(self.settings.job_timeout_seconds):
             result = await handler.run(execution)
-        if not isinstance(result, Publication):
+        if not isinstance(result, (Publication, EmbeddingPublication)):
             raise WorkFailure("invalid_output")
         await self.store.complete(execution, result)
 

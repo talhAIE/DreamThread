@@ -47,7 +47,7 @@ class Queue:
             candidate = await c.scalar(
                 select(J.c.id)
                 .where(
-                    J.c.kind == "analysis",
+                    J.c.kind.in_(["analysis", "embedding"]),
                     J.c.attempts < s.job_max_attempts,
                     or_(
                         and_(J.c.status == "queued", J.c.run_after <= now),

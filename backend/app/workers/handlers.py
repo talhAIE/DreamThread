@@ -1,6 +1,7 @@
 """Production single-entry Nemotron extraction/reflection registry."""
 
 from app.services.extraction import ExtractionPipeline
+from app.services.indexing import EmbeddingHandler
 
 
 class AnalysisHandler:
@@ -12,4 +13,4 @@ class AnalysisHandler:
 
 
 def default_handlers(settings):
-    return {"analysis": AnalysisHandler(settings)}
+    return {"analysis": AnalysisHandler(settings), "embedding": EmbeddingHandler(settings)}

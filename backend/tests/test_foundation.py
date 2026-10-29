@@ -138,6 +138,9 @@ def test_production_configuration_accepts_only_complete_secure_settings():
         "nebius_reasoning_model": "test-reasoning-id",
         "nebius_embedding_model": "test-embedding-id",
         "embedding_dimensions": 128,
+        "embedding_document_prefix": "",
+        "embedding_query_prefix": "",
+        "embedding_prefixes_verified": True,
     }
     assert Settings(**values).app_env == "production"
     for key, bad in [
@@ -146,6 +149,8 @@ def test_production_configuration_accepts_only_complete_secure_settings():
         ("database_url", URL),
         ("queue_database_url", URL),
         ("embedding_dimensions", 0),
+        ("embedding_prefixes_verified", False),
+        ("embedding_query_prefix", None),
     ]:
         with pytest.raises(ValidationError):
             Settings(**{**values, key: bad})

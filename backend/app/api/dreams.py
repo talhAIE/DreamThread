@@ -15,7 +15,10 @@ from app.schemas.dreams import (
     DreamQuery,
     Revision,
 )
+from app.schemas.retrieval import CandidateResult, IndexRequest, IndexResult
+from app.services.indexing import IndexService
 from app.services.journal import JournalService
+from app.services.retrieval import RetrievalService
 
 router = APIRouter(prefix="/dreams", tags=["Journal"])
 IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)]
@@ -77,3 +80,29 @@ async def analysis(request: Request, identity: CurrentIdentity, dream_id: UUID):
 async def remove(request: Request, identity: CurrentIdentity, dream_id: UUID):
     await service(request).remove(identity, dream_id)
     return Response(status_code=204)
+
+
+@router.post("/{dream_id}/index", response_model=IndexResult, status_code=202)
+async def index_dream(
+    request: Request,
+    identity: CurrentIdentity,
+    dream_id: UUID,
+    payload: IndexRequest,
+    idempotency_key: IdempotencyKey,
+):
+    return await IndexService(request.app.state.database, request.app.state.settings).request(
+        identity,
+        dream_id,
+        payload.expected_version,
+        idempotency_key,
+    )
+
+
+@router.get("/{dream_id}/candidates", response_model=CandidateResult)
+async def candidates(request: Request, identity: CurrentIdentity, dream_id: UUID):
+    return await RetrievalService(
+        request.app.state.database, request.app.state.settings
+    ).candidates(
+        identity,
+        dream_id,
+    )

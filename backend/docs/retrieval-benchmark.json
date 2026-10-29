@@ -1,0 +1,12 @@
+{
+  "date": "2026-10-29",
+  "fixture": "tests/fixtures/retrieval_benchmark.json",
+  "test": "tests/test_phase7_retrieval.py::test_labeled_fixture_recall_at_five_benchmark",
+  "documents": 13,
+  "queries": 3,
+  "recall_at_5": 1.0,
+  "per_query_recall": [1.0, 1.0, 1.0],
+  "database": "real PostgreSQL/pgvector exact cosine",
+  "provider": "real SDK with synthetic HTTPX transport vectors",
+  "scope": "Hybrid retrieval pipeline regression only. Not a live model-quality benchmark."
+}

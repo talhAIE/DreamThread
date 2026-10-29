@@ -241,3 +241,60 @@ Remaining gate and limits:
 - Quote checks verify source fidelity; wording/negation guards are English-focused heuristics,
   not a guarantee of psychological interpretation quality or universal injection resistance.
 - Docker/hosted CI and hosted Supabase account checks remain deployment verification tasks.
+
+## Phase 7 - October 29, 2026
+
+Implemented:
+
+- Nebius embedding SDK adapter, explicit verified document/query input prefixes, conservative
+  per-input token and batch byte/count guards, finite nonzero float32 vector validation and
+  pre-insertion dimension checks. Central worker owns retries; SDK retries remain disabled.
+- Exact current-source indexing: one vector for short entries, deterministic contiguous Unicode
+  chunks for longer entries, source/input hashes, offsets and separate query vectors where needed.
+- Migration 0005_embedding_spaces: tenant-owned spaces and chunk vectors, composite ownership/
+  dimension foreign keys, forced RLS and restricted grants. Legacy fixed-size vectors are retained
+  but not searched. Current schema has 37 tables including Alembic's version table.
+- Independent durable embedding jobs, automatically queued after admitted successful analysis
+  when configured; explicit quota/idempotent POST /dreams/{id}/index for backfill/retry.
+- Index failure/cancellation/reaping preserves single-entry analysis state. Vector publication,
+  complete-archive space activation and job success commit atomically with source/lease fences.
+- GET /dreams/{id}/candidates: exact tenant/space/current-revision cosine top 8, text/motif and
+  confirmed enabled association matches, final cap of 12 unique current saved dreams. Responses
+  include snippets, source versions/hashes, ranking metadata, coverage and explicit degradation.
+- Provider outages retain bounded retry jobs while lexical/motif fallback remains usable.
+- Model/dimension/prefix/chunk changes require a new version. Complete re-embedding precedes
+  atomic activation; consistent old-space queries remain available during rebuilding. Different
+  dimensions can coexist without cross-space comparisons.
+- Reindex CLI, opt-in synthetic live embedding probe, Compose/config examples, API contract and
+  benchmark fixture/result documentation. No real model ID or prefixes are silently selected.
+
+Verification:
+
+- Ruff passed. Full suite: **132 passed, zero skipped**, on the disposable PostgreSQL 18.4/
+  pgvector cluster; SDK embedding requests used controlled HTTPX transports.
+- Migration upgrade/downgrade/rebuild, forced tenant isolation and runtime readiness passed.
+- Exact cosine nominations exclude other owners, current dream, stale revisions, drafts and
+  deleted entries. Two house candidates never create a connection or merge motif identities.
+- Confirmed associations/specific motifs outrank generic text; long Urdu/emoji chunks cover
+  every source code point and repeated chunk matches deduplicate to one dream.
+- Provider outage returns disclosed text fallback, retains retry work and later recovers.
+- Dimension mismatch prevents publication; model changes without a new version fail; partial
+  rebuild retains v1 and complete rebuild atomically activates v2, including changed dimensions.
+- Simulated activation failure rolls back chunk vectors and success. Source edits during an
+  embedding request cancel late publication. Automatic indexing shares analysis admission.
+- Labeled synthetic fixture: **recall@5 = 1.0**, three queries over 13 documents. See
+  retrieval-benchmark.json; this measures pipeline behavior, not real model semantic quality.
+- Live Uvicorn/OpenAPI/request-ID/database-unavailable smoke passed. Both new CLI --help
+  commands passed without provider requests.
+
+Remaining verification and boundaries:
+
+- Live Nemotron and embedding probes remain pending the user's credentials, as requested.
+  Verify catalog ID, model-specific prefixes, dimension and provider limits before live indexing.
+- Retrieval nominates candidates only. Evidence-based comparison/identity separation remains
+  Phase 9; user-facing memory correction endpoints remain Phase 8. No identity is inferred here.
+- Exact search and lexical scoring scan a small owner archive. Large-archive performance,
+  inactive-account/retired-space retention, Docker/hosted CI and hosted auth remain later checks.
+- Source mutation still conservatively cancels owner jobs; the documented reindex command can
+  refill outstanding indexing. Run migrations and update EXPECTED_SCHEMA_REVISION before use.
+- The isolated test server is stopped after verification; installed database services are untouched.

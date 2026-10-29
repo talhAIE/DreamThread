@@ -37,6 +37,8 @@ class WorkFailure(Exception):
             "provider_not_configured",
             "provider_configuration",
             "provider_input_too_large",
+            "embedding_dimension_mismatch",
+            "embedding_version_conflict",
         }
         self.code = code if code in allowed else "internal_error"
         self.retryable, self.retry_after = retryable, retry_after

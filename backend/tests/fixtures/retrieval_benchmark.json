@@ -1,0 +1,23 @@
+{
+  "description": "Synthetic pipeline fixture; not a live-model semantic quality evaluation.",
+  "documents": {
+    "house_query": "I returned to the cedar house carrying a brass key.",
+    "house_match": "The cedar house opened when I turned the brass key.",
+    "unrelated_house": "A glass house floated above Mars.",
+    "ocean_query": "I floated on the ocean under a silver moon near a red boat.",
+    "ocean_match": "The red boat crossed the ocean beneath the silver moon.",
+    "stranger_query": "A stranger wearing a velvet hat waited beside the yellow station clock.",
+    "stranger_match": "At the yellow station clock the stranger tipped a velvet hat.",
+    "distractor_1": "I solved equations in a classroom.",
+    "distractor_2": "My phone rang inside a crowded supermarket.",
+    "distractor_3": "I flew over mountains and clouds.",
+    "distractor_4": "The library had endless shelves of books.",
+    "distractor_5": "A dog chased a ball across a field.",
+    "distractor_6": "I missed the bus while carrying groceries."
+  },
+  "queries": [
+    {"id": "house_query", "relevant": ["house_match"]},
+    {"id": "ocean_query", "relevant": ["ocean_match"]},
+    {"id": "stranger_query", "relevant": ["stranger_match"]}
+  ]
+}

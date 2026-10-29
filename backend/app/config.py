@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
     db_pool_size: int = Field(default=3, ge=1, le=20)
     db_timeout_seconds: float = Field(default=3, gt=0, le=30)
-    expected_schema_revision: str = "0004_worker_checkpoints"
+    expected_schema_revision: str = "0005_embedding_spaces"
     supabase_url: str | None = None
     supabase_publishable_key: SecretStr | None = None
     supabase_secret_key: SecretStr | None = None
@@ -29,8 +29,13 @@ class Settings(BaseSettings):
     nebius_extraction_model: str | None = Field(default=None, min_length=1, max_length=200)
     nebius_reasoning_model: str | None = Field(default=None, min_length=1, max_length=200)
     nebius_embedding_model: str | None = Field(default=None, min_length=1, max_length=200)
-    embedding_dimensions: int | None = Field(default=None, gt=0)
+    embedding_dimensions: int | None = Field(default=None, gt=0, le=16000)
     embedding_version: str = Field(default="v1", min_length=1, max_length=50)
+    embedding_document_prefix: str | None = Field(default=None, max_length=1000)
+    embedding_query_prefix: str | None = Field(default=None, max_length=1000)
+    embedding_prefixes_verified: bool = False
+    embedding_input_token_budget: int = Field(default=2048, ge=512, le=32768)
+    embedding_batch_byte_budget: int = Field(default=32768, ge=4096, le=262144)
     prompt_version: str = Field(default="v1", min_length=1, max_length=50)
     voice_enabled: bool = False
     demo_enabled: bool = False
@@ -148,6 +153,12 @@ class Settings(BaseSettings):
             missing = [name for name in required if not getattr(self, name)]
             if missing:
                 raise ValueError("production requires: " + ", ".join(missing))
+            if (
+                not self.embedding_prefixes_verified
+                or self.embedding_document_prefix is None
+                or self.embedding_query_prefix is None
+            ):
+                raise ValueError("production requires verified explicit embedding prefixes")
             if self.expected_schema_revision == "unversioned":
                 raise ValueError("production requires a migrated expected_schema_revision")
             if any(not origin.startswith("https://") for origin in self.cors_origins):
@@ -175,6 +186,9 @@ class Settings(BaseSettings):
                 self.nebius_api_key,
                 self.nebius_embedding_model,
                 self.embedding_dimensions,
+                self.embedding_prefixes_verified,
+                self.embedding_document_prefix is not None,
+                self.embedding_query_prefix is not None,
             )
         )
         return {

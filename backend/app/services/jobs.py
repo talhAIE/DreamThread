@@ -9,8 +9,10 @@ from app.services.journal import JournalService, pipeline_version
 
 J, D, ART = tables["app.jobs"], tables["app.dreams"], tables["app.job_artifacts"]
 ERRORS = {
-    "provider_not_configured": "Configure the Nebius API key and NVIDIA Nemotron model.",
-    "provider_configuration": "Select an available NVIDIA Nemotron model in server configuration.",
+    "embedding_dimension_mismatch": "Embedding dimensions do not match server configuration.",
+    "embedding_version_conflict": "Change EMBEDDING_VERSION before rebuilding with new settings.",
+    "provider_not_configured": "Configure the Nebius API key and the model required by this job.",
+    "provider_configuration": "Check model IDs, dimensions and verified input prefixes.",
     "provider_input_too_large": "The entry exceeds the configured model context allowance.",
     "inference_not_implemented": "Analysis inference will be available after the inference phase.",
     "provider_auth_failed": "The inference service configuration needs attention.",

@@ -278,3 +278,55 @@ and result status are private telemetry; raw provider responses and hidden reaso
 Safe provider failures include provider_not_configured, provider_configuration and
 provider_input_too_large. Fix configuration before a manual retry; use /dreams/{id}/analyze when
 the pipeline fingerprint changed. Live account capability verification remains pending credentials.
+
+## Indexing and candidate retrieval (Phase 7)
+
+POST /api/v1/dreams/{id}/index requires Idempotency-Key and {"expected_version":1}.
+Returns 202 with dream_id, job_id and status. Another user's/missing source returns 404;
+drafts or changed expected versions return 409; missing/invalid embedding configuration returns
+503 with a safe code. New explicit work reserves one AI admission unit, potentially returning
+429. Concurrent requests deduplicate. Same-key replays return their original job; a new key can
+resubmit a failed/cancelled job. Active/succeeded current work is reused without another charge.
+Automatic indexing is queued with successful analysis and shares its existing workflow admission.
+
+Embedding jobs have kind=embedding and use the durable lease/timeout/backoff/reaper machinery.
+Failure affects indexing only, preserving single-entry analysis. Poll /jobs/{id}; retry exhausted
+indexing through a fresh /dreams/{id}/index request. Configuration changes stale old jobs through
+the pipeline fingerprint; submit current work again. Safe additional errors are
+embedding_dimension_mismatch and embedding_version_conflict.
+
+GET /api/v1/dreams/{id}/candidates returns:
+
+```json
+{
+  "dream_id": "uuid",
+  "revision_id": "uuid",
+  "archive_version": 4,
+  "memory_version": 0,
+  "degraded": true,
+  "degraded_reasons": ["embedding_space_building", "embedding_coverage_incomplete"],
+  "active_embedding_version": "v1",
+  "target_embedding_version": "v2",
+  "indexed_dreams": 3,
+  "saved_dreams": 4,
+  "embedding_job_id": "uuid",
+  "embedding_job_status": "queued",
+  "candidates": [],
+  "purpose": "Candidates for comparison; similarity does not establish identity or causation."
+}
+```
+
+Each candidate has dream_id, revision_id, source_hash, dream_date, title, snippet, rank, score,
+nullable semantic_rank/cosine_similarity, reasons and association_ids. Candidate snippets are
+discovery context, not verified evidence. Re-fetch owned original revisions before comparison.
+At most 8 semantic dreams are nominated; text/motif matching expands the combined pool, and
+the final result contains at most 12 distinct dreams. Maximum chunk cosine, lexical specificity,
+motif confirmation and confirmed enabled associations affect ordering. Scores are not confidence
+or identity probabilities. No motif identity, connection or reported mood is changed by retrieval.
+
+All sources are current saved owned revisions, excluding the primary source. Vector search is
+exact and filtered to one active tenant-owned space before cosine evaluation. Changing model,
+dimension, prefixes or chunking requires a new embedding version and complete reindexing before
+an atomic switch. The old complete space can serve consistent stored queries during rebuilding;
+partial coverage or missing primary vectors is disclosed. Text/motif fallback remains available
+without a provider request. No live provider behavior is verified yet.

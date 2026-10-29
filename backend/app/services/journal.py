@@ -38,6 +38,11 @@ def pipeline_version(settings):
         settings.nebius_embedding_model,
         settings.nebius_output_mode,
         settings.model_max_output_tokens,
+        settings.embedding_dimensions,
+        settings.embedding_document_prefix,
+        settings.embedding_query_prefix,
+        settings.embedding_prefixes_verified,
+        settings.embedding_input_token_budget,
     ]
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()[:32]
 

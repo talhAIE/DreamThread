@@ -22,3 +22,24 @@ verify database publication, hosted authentication or Docker deployment.
 Local coverage uses the real SDK with HTTPX MockTransport and real PostgreSQL/pgvector for
 worker publication. It verifies request shape, errors, bounded repair, citation checks,
 checkpoint reuse and atomic rollback. It cannot establish real provider output quality.
+
+## Phase 7 embedding inputs
+
+The embedding model ID remains unset until verified against the user's account. Nebius's
+[official cookbook](https://github.com/nebius/token-factory-cookbook/blob/main/integrations/pixeltable/README.md)
+demonstrates its OpenAI-compatible embeddings integration. The configured model's own card
+defines input prefixes/instructions; e.g. the [Qwen3 embedding card](https://huggingface.co/Qwen/Qwen3-Embedding-8B)
+shows task instructions for retrieval queries. This is a format reference, not a guarantee of
+current account availability or an automatic model selection.
+
+Set both EMBEDDING_DOCUMENT_PREFIX and EMBEDDING_QUERY_PREFIX explicitly (including empty
+strings if required), then EMBEDDING_PREFIXES_VERIFIED=true after checking the model card.
+Run `uv run python scripts/probe_embeddings.py --live` only when ready. The script confirms
+catalog membership, measures dimension using synthetic document/query inputs, rejects a
+configured dimension mismatch, and exercises the production adapter. Set EMBEDDING_DIMENSIONS
+to the measured value before indexing. Verify provider input/batch limits too. No live
+embedding probe has been run; the user's development-first instruction still applies.
+
+Changing these inputs/model/dimension requires a new EMBEDDING_VERSION. Each tenant space
+stores the full input contract, model, dimension and fingerprint. The local benchmark result
+in retrieval-benchmark.json uses synthetic transport vectors and does not measure the real model.

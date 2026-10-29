@@ -14,6 +14,7 @@ from app.db.models import tables
 from app.errors import APIError
 from app.services.admission import reserve_ai
 from app.services.evidence import OutputInvalid, verify_citation
+from app.services.indexing import EmbeddingPublication, IndexService
 from app.services.journal import pipeline_version
 from app.workers.types import (
     LeaseLost,
@@ -236,7 +237,8 @@ class Store:
                     + timedelta(seconds=self.settings.job_stage_timeout_seconds),
                 )
             )
-            await c.execute(update(D).where(D.c.id == dream["id"]).values(analysis_state=stage))
+            if current["kind"] == "analysis":
+                await c.execute(update(D).where(D.c.id == dream["id"]).values(analysis_state=stage))
 
     async def save_checkpoint(self, execution, stage, value, archive_bound):
         if not STAGE.fullmatch(stage):
@@ -306,6 +308,8 @@ class Store:
             return artifact["output"]
 
     async def complete(self, execution, publication):
+        if isinstance(publication, EmbeddingPublication):
+            return await self.complete_embedding(execution, publication)
         refs = execution.sources + publication.sources
         values = json_payload(publication.analysis.model_dump(mode="json"))
         async with self.locked(execution.job, refs) as (c, account, dreams, current, now):
@@ -405,7 +409,50 @@ class Store:
                     )
                 )
             await c.execute(update(D).where(D.c.id == dream["id"]).values(analysis_state="ready"))
+            if self.settings.nebius_embedding_model:
+                # Configuration errors must not roll back a valid single-entry analysis.
+                try:
+                    async with c.begin_nested():
+                        await IndexService(self.db, self.settings).enqueue(
+                            c,
+                            Identity(current["user_id"], account["is_anonymous"]),
+                            account,
+                            dream,
+                            parent=current,
+                        )
+                except WorkFailure:
+                    # Candidates disclose configuration status; explicit indexing can retry.
+                    pass
             # Success and publication are one commit; no pre-commit acknowledgement.
+            await c.execute(
+                update(J)
+                .where(J.c.id == current["id"])
+                .values(
+                    status="succeeded",
+                    stage="ready",
+                    error_code=None,
+                    lease_token=None,
+                    leased_until=None,
+                    deadline_at=None,
+                    stage_deadline_at=None,
+                )
+            )
+
+    async def complete_embedding(self, execution, publication):
+        async with self.locked(execution.job, execution.sources) as (
+            c,
+            account,
+            dreams,
+            current,
+            now,
+        ):
+            if current["kind"] != "embedding":
+                raise WorkFailure("invalid_output")
+            if current["stage_deadline_at"] and current["stage_deadline_at"] <= now:
+                raise WorkFailure("stage_timeout", retryable=True)
+            dream = self.guard(account, dreams, current, execution.sources)
+            await self.check_hashes(c, execution.sources)
+            await IndexService(self.db, self.settings).publish(c, execution, publication, dream)
             await c.execute(
                 update(J)
                 .where(J.c.id == current["id"])
@@ -443,11 +490,12 @@ class Store:
                     stage_deadline_at=None,
                 )
             )
-            await c.execute(
-                update(D)
-                .where(D.c.id == dream["id"])
-                .values(analysis_state="queued" if retry else "failed")
-            )
+            if current["kind"] == "analysis":
+                await c.execute(
+                    update(D)
+                    .where(D.c.id == dream["id"])
+                    .values(analysis_state="queued" if retry else "failed")
+                )
 
     async def cancel(self, job):
         try:
@@ -467,7 +515,8 @@ class Store:
                 )
                 target = dreams.get(UUID(current["payload"]["dream_id"]))
                 if (
-                    target
+                    current["kind"] == "analysis"
+                    and target
                     and str(target["current_revision_id"]) == current["payload"]["revision_id"]
                 ):
                     await c.execute(
@@ -503,7 +552,7 @@ class Store:
                         stage_deadline_at=None,
                     )
                 )
-                if primary:
+                if primary and current["kind"] == "analysis":
                     await c.execute(
                         update(D).where(D.c.id == primary["id"]).values(analysis_state="failed")
                     )

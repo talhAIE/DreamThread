@@ -67,11 +67,17 @@ class Database:
                     )).scalars())
                     if revisions != {self.expected}:
                         return "schema_mismatch"
-                    dimension = await connection.scalar(text(
-                        "SELECT embedding_dimensions FROM app.schema_configuration WHERE id = 1"
-                    ))
-                    if self.dimensions is None or dimension != self.dimensions:
-                        return "schema_mismatch"
+                    if self.expected == "0005_embedding_spaces":
+                        # Versioned spaces enforce their own dimensions. The legacy fixed-size
+                        # vector column is retained for migration compatibility, never searched.
+                        if self.dimensions is not None and not 1 <= self.dimensions <= 16000:
+                            return "schema_mismatch"
+                    else:
+                        dimension = await connection.scalar(text(
+                            "SELECT embedding_dimensions FROM app.schema_configuration WHERE id = 1"
+                        ))
+                        if self.dimensions is None or dimension != self.dimensions:
+                            return "schema_mismatch"
                     return "ok"
         except Exception:
             return "unavailable"

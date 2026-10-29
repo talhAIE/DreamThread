@@ -1,4 +1,4 @@
-# DreamThread backend - Phase 6
+# DreamThread backend - Phase 7
 
 Python 3.12, FastAPI, SQLAlchemy Core, Alembic, PostgreSQL and pgvector.
 This release includes the database foundation, verified authentication, profile/preferences
@@ -6,7 +6,8 @@ endpoints, shared AI quota admission, and the dream journal API with immutable r
 durable analysis submissions, source invalidation and a recoverable background worker.
 The worker now calls NVIDIA Nemotron through Nebius for extraction and tentative reflections,
 verifies source quotes, and publishes linked evidence atomically. Live account verification is
-pending the user's credentials; local tests use controlled provider responses.
+pending the user's credentials; local tests use controlled provider responses. Phase 7 adds
+durable embedding jobs and tenant-scoped hybrid candidate retrieval with visible fallback.
 
 ## Local setup
 
@@ -89,8 +90,9 @@ and source invalidation still belong to later phases.
 - 0002_revision_guard: database evidence source/span validation.
 - 0003_identity_limits: profile/preference versions, verified anonymous status, tenant-isolated
   AI admission counters.
-- 0004_worker_checkpoints: lease/stage deadlines and private checkpoint artifacts. Set
-  EXPECTED_SCHEMA_REVISION=0004_worker_checkpoints in existing .env files before starting.
+- 0004_worker_checkpoints: lease/stage deadlines and private checkpoint artifacts.
+- 0005_embedding_spaces: tenant-private vector spaces and source-aligned embedding chunks.
+  Set EXPECTED_SCHEMA_REVISION=0005_embedding_spaces in existing .env files before starting.
 - app.alembic_version is readable by runtime for readiness; application DDL belongs to owner.
 - schema_v1.py/security_v1.py are frozen snapshots. Future changes use new migrations;
   never edit released snapshots. Runtime tables currently re-export baseline metadata.
@@ -250,7 +252,83 @@ metadata only. This live check has **not** been run; the user deferred it until 
 See [capability status](docs/model-capabilities.md). Then run the API/worker and save a dream,
 poll its job, and retrieve /api/v1/dreams/{id}/analysis for the complete database-backed flow.
 Phase 6 changes the pipeline fingerprint; analyze the current dream again if an older job is stale.
-The database head remains 0004_worker_checkpoints; no Phase 6 migration is needed.
+Phase 6 required no migration. Phase 7 advances the head to 0005_embedding_spaces.
+
+## Embeddings and retrieval
+
+Migrate with `uv run alembic upgrade head` using the separate migration credentials. The existing
+worker now handles both analysis and embedding jobs. Configure NEBIUS_EMBEDDING_MODEL with an
+available catalog ID, EMBEDDING_DIMENSIONS with its measured dimension, and both
+EMBEDDING_DOCUMENT_PREFIX and EMBEDDING_QUERY_PREFIX with the exact model-card input format.
+An explicitly empty prefix is allowed. Set EMBEDDING_PREFIXES_VERIFIED=true only after checking
+that contract; absent prefixes or the false default prevent indexing. Neither model IDs nor
+prefixes are guessed. The embedding model can be a different open model; Nemotron remains the
+required NVIDIA model used for extraction/reflections.
+
+Use `uv run python scripts/probe_embeddings.py --live` when credentials are ready. This opt-in
+check confirms catalog membership, measures dimensions with synthetic text, validates vectors
+and exercises the production adapter. It makes potentially billable calls. It has not been run.
+Reference model/card links and verification limits are in [capability status](docs/model-capabilities.md).
+
+Successful analysis automatically queues indexing when embedding configuration is valid. It
+shares that analysis workflow's existing admission unit. Indexing failures never overwrite a
+ready reflection. To index independently or retry an exhausted embedding job, call
+POST /api/v1/dreams/{id}/index with Idempotency-Key and {"expected_version":1}. Explicit indexing
+costs one admission unit when new work is queued; replay or reuse does not charge again. The
+response supplies a job_id for the existing /jobs/{id} polling API. Transient provider errors
+retain the durable job with bounded worker retries. After exhaustion, submit /index with a new
+key. The generic /jobs/{id}/retry route currently supports analysis jobs only.
+
+GET /api/v1/dreams/{id}/candidates makes no model calls. It returns at most 12 unique current
+saved dreams, merging semantic top 8 with text and non-rejected motif matches. Confirmed
+motifs/associations receive stronger weight; rare shared words outrank generic text matches.
+Candidates include current IDs/revisions/hashes, dates, snippets and ranking reasons; fetch
+original source separately before evidence-based comparison. Similarity never creates an
+identity merge or connection. Comparison is Phase 9. Memory-editing endpoints arrive in Phase 8;
+retrieval can already consume confirmed records through the shared schema.
+
+Each response exposes degraded/reasons, active/target embedding versions, current archive
+coverage and the primary entry's latest indexing job. When vectors are absent, rebuilding or
+failed, text/motif retrieval remains available and degradation is disclosed. Complete but empty
+results are valid. Stale revisions, drafts, deleted sources, the current dream and other users
+are excluded before ranking. Exact cosine uses a materialized tenant/space/current-source filter
+before distance computation, without an ANN index. This MVP scans the owner's archive and is
+intended for small journals.
+
+Short entries use one exact-source embedding. Longer entries use deterministic, contiguous
+Python Unicode spans under EMBEDDING_INPUT_TOKEN_BUDGET (UTF-8 byte bound plus 32-token service
+headroom and the longer prefix). Nothing is truncated. Requests batch at most 16 inputs and
+respect EMBEDDING_BATCH_BYTE_BUDGET. Verify both limits against the actual provider/model.
+Document and query embeddings are stored separately when prefixes differ. Chunk matches
+deduplicate by dream and use maximum cosine similarity; these scores nominate candidates only.
+
+Change EMBEDDING_VERSION whenever the model, dimension, prefixes or chunk contract changes.
+Reusing a version with changed settings fails with embedding_version_conflict. Rebuild the
+complete saved archive, for example from the trusted backend terminal:
+
+```powershell
+uv run python scripts/reindex_archive.py --user-id YOUR_VERIFIED_ACCOUNT_UUID
+```
+
+This queues potentially billable work through runtime tenant credentials and quota admission;
+it does not impersonate a user through the HTTP API. Run the worker to process it. On quota
+exhaustion, rerun later; admitted requests replay. New/edited sources can require another pass.
+Failed jobs need a fresh /index request key. A replacement space becomes active atomically under
+the account lock only when every current saved revision is indexed. Until then retrieval uses
+the previous complete space where available and reports rebuilding. Stored query vectors allow
+that old space to remain internally consistent even after server settings change. Different
+dimensions coexist in isolated spaces and are never compared.
+
+Phase 7 uses embedding_spaces/embedding_chunks; the Phase 2 fixed-dimension dream_embeddings
+table and baseline schema_configuration value remain for migration compatibility and are not
+searched. New-space dimension checks happen before insertion and in PostgreSQL. Old space
+vectors are retained for rollback and cascade away with their source; broader retention is
+Phase 14 work. Source mutation still conservatively cancels owner jobs, so use reindex_archive
+to restore outstanding indexing after edits when needed.
+
+[Benchmark results](docs/retrieval-benchmark.json) record recall@5=1.0 on three queries over
+13 labeled fixture entries using real PostgreSQL and synthetic provider vectors. This is a
+pipeline regression check, not a claim about real model retrieval quality.
 
 ## Configuration and observability
 
