@@ -1,7 +1,8 @@
 '''FastAPI router for Constellation (Phase 10).'''
 
-from fastapi import APIRouter, Request
 from uuid import UUID
+
+from fastapi import APIRouter, Request
 
 from app.api.dependencies import CurrentIdentity
 from app.schemas.constellation import MotifResponse
