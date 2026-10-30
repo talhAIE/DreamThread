@@ -29,19 +29,21 @@ from app.errors import (
 from app.schemas.errors import ErrorEnvelope
 
 
-def create_app(settings: Settings | None = None, db: Database | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    database: Database | None = None,
+    authenticator=None,
+    *,
+    db: Database | None = None,
+) -> FastAPI:
     """Create and configure the FastAPI application.
-
-    The original implementation accepted an optional ``Database`` instance as the
-    second positional argument.  Tests use this to inject a mock database, so we
-    restore that behaviour while keeping the existing default of constructing a
-    ``Database`` from ``settings`` when none is provided.
 
     Args:
         settings: Optional ``Settings`` instance; if ``None`` the settings are
             loaded from the environment.
-        db: Optional pre‑configured ``Database`` instance used primarily for
-            testing.  When ``None`` a new ``Database`` is created.
+        database: Optional preconfigured ``Database`` instance.
+        authenticator: Optional authenticator instance.
+        db: Backward-compatible alias for ``database``.
     Returns:
         Configured ``FastAPI`` application.
     """
@@ -51,8 +53,13 @@ def create_app(settings: Settings | None = None, db: Database | None = None) -> 
         fields = [str(err["loc"][0]) for err in error.errors()]
         raise RuntimeError("Invalid configuration: " + ", ".join(fields)) from None
 
+    if database is not None and db is not None:
+        raise ValueError("Provide either 'database' or 'db', not both")
+    db = database if database is not None else db
     db = db if db is not None else Database(settings)
-    authenticator = SupabaseIdentity(settings)
+    authenticator = (
+        authenticator if authenticator is not None else SupabaseIdentity(settings)
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
