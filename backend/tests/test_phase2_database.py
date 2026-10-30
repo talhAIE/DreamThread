@@ -298,7 +298,7 @@ def test_async_tenant_context_and_readiness(cluster):
 
 def test_owner_connection_is_not_runtime_ready(cluster):
     async def check():
-        url = str(cluster["admin"].url)
+        url = cluster["admin"].url.render_as_string(hide_password=False)
         db = Database(Settings(_env_file=None, database_url=url,
                                expected_schema_revision="0006_personal_memory",
                                embedding_dimensions=3))
