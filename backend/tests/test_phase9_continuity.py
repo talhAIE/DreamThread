@@ -4,22 +4,14 @@ import hashlib
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.api.dependencies import current_identity
-from app.auth.identity import Identity
 from app.config import Settings
 from app.errors import APIError
-from app.main import create_app
 from app.schemas.continuity import (
     ComparisonProposal,
-    ConnectionEvidenceListResponse,
-    ConnectionEvidenceRead,
-    ConnectionListResponse,
     ConnectionPatchRequest,
     ConnectionRead,
-    ContinuityOutput,
 )
 from app.services.continuity import (
     ContinuityEngine,
@@ -254,7 +246,7 @@ class MockConnection:
             if hasattr(stmt, "compile"):
                 try:
                     params = stmt.compile().params
-                    for k, v in params.items():
+                    for _k, v in params.items():
                         if isinstance(v, UUID) and v in self.revisions:
                             rev_id_filter = v
                 except Exception:
@@ -289,7 +281,12 @@ class MockConnection:
                     pass
             filter_conn_id = None
             for k, v in params.items():
-                if isinstance(v, UUID) and (k == "id_1" or "id" in k) and k != "user_id" and k != "user_id_1":
+                if (
+                    isinstance(v, UUID)
+                    and (k == "id_1" or "id" in k)
+                    and k != "user_id"
+                    and k != "user_id_1"
+                ):
                     filter_conn_id = v
             matched = []
             for c in self.connections.values():
@@ -380,7 +377,7 @@ async def test_continuity_tools_scope_strictly_to_tenant():
 
 @pytest.mark.anyio
 async def test_reanalysis_preserves_confirmed_and_rejected_decisions():
-    """Requirement: Confirm/reject works and rejection survives duplicate delivery and reanalysis."""
+    """Requirement: Confirmation and rejection persist across duplicate delivery and reanalysis."""
     user_id = uuid4()
     d1 = UUID("11111111-1111-1111-1111-111111111111")
     d2 = UUID("22222222-2222-2222-2222-222222222222")

@@ -4,14 +4,13 @@ Tool-bounded connection discovery, citation verification, canonical pair orderin
 and decision-preserving persistence.
 """
 
-import hashlib
 import json
 import re
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.db.models import tables
@@ -30,7 +29,6 @@ from app.schemas.continuity import (
 from app.services.evidence import OutputInvalid, verify_citation
 from app.services.journal import current_source, owned_dream
 from app.services.retrieval import RetrievalService, lexical_rank, snippet
-from app.workers.types import WorkFailure
 
 PROMPTS = Path(__file__).parents[1] / "prompts"
 
@@ -54,7 +52,11 @@ CONTINUITY_TOOLS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query keywords or motifs"},
-                    "limit": {"type": "integer", "description": "Max results to return (1-5)", "default": 3},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (1-5)",
+                        "default": 3,
+                    },
                 },
                 "required": ["query"],
             },
@@ -82,7 +84,9 @@ CONTINUITY_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_personal_associations",
-            "description": "Read confirmed personal associations and meanings for recurring motifs.",
+            "description": (
+                "Read confirmed personal associations and meanings for recurring motifs."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -113,7 +117,10 @@ CONTINUITY_TOOLS = [
         "type": "function",
         "function": {
             "name": "propose_comparison",
-            "description": "Submit a structured connection proposal between two dreams with supporting quotes.",
+            "description": (
+                "Submit a structured connection proposal between two dreams "
+                "with supporting quotes."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -185,7 +192,9 @@ class ContinuityTools:
         self.user_id = user_id
         self.settings = settings
 
-    async def search_dreams(self, query: str, filters: dict | None = None, limit: int = 3) -> list[dict]:
+    async def search_dreams(
+        self, query: str, filters: dict | None = None, limit: int = 3
+    ) -> list[dict]:
         limit = max(1, min(limit, 5))
         c = self.connection
         rows = (
@@ -287,7 +296,7 @@ class ContinuityTools:
             .join(M, and_(M.c.id == A.c.motif_id, M.c.user_id == A.c.user_id))
             .where(
                 A.c.user_id == self.user_id,
-                A.c.enabled == True,
+                A.c.enabled.is_(True),
                 A.c.status == "confirmed",
                 A.c.deleted_at.is_(None),
             )
@@ -337,7 +346,9 @@ class ContinuityTools:
         return [
             {
                 "connection_id": str(r["id"]),
-                "connected_dream_id": str(r["dream_b_id"] if r["dream_a_id"] == d_id else r["dream_a_id"]),
+                "connected_dream_id": str(
+                    r["dream_b_id"] if r["dream_a_id"] == d_id else r["dream_a_id"]
+                ),
                 "relation_key": r["relation_key"],
                 "observation": r["observation"],
             }
@@ -958,7 +969,13 @@ class ContinuityService:
                         EVID.c.exact_quote,
                         EVID.c.content_hash,
                     )
-                    .join(CONN_EVID, and_(CONN_EVID.c.evidence_id == EVID.c.id, CONN_EVID.c.user_id == user_id))
+                    .join(
+                        CONN_EVID,
+                        and_(
+                            CONN_EVID.c.evidence_id == EVID.c.id,
+                            CONN_EVID.c.user_id == user_id,
+                        ),
+                    )
                     .where(CONN_EVID.c.connection_id == connection_id)
                     .order_by(EVID.c.dream_id, EVID.c.start)
                 )

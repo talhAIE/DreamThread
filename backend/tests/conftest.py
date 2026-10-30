@@ -2,8 +2,10 @@
 Ensures the project's backend directory (containing the `app` package) is on PYTHONPATH
 so that `import app` works when tests are executed from the repository root.
 """
-import sys
 import pathlib
+import sys
+
+import pytest
 
 # Add the backend directory (which contains the "app" package) to PYTHONPATH.
 repo_root = pathlib.Path(__file__).resolve().parents[2]
@@ -11,8 +13,7 @@ backend_path = repo_root / "backend"
 if str(backend_path) not in sys.path:
     sys.path.insert(0, str(backend_path))
 
-import pytest
-from app.config import Settings
+from app.config import Settings  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
