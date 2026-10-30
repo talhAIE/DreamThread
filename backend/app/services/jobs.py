@@ -108,8 +108,21 @@ class JobService:
 
     async def get(self, identity, job_id):
         async with self.db.tenant_transaction(identity.user_id) as c:
-            account = await active_account(c, identity.user_id)
-            return await self.view(c, account, await self.owned(c, identity.user_id, job_id))
+            account = (
+                await c.execute(
+                    select(tables["app.accounts"]).where(
+                        tables["app.accounts"].c.id == identity.user_id
+                    )
+                )
+            ).mappings().one_or_none()
+            if account is None:
+                raise APIError("account_unavailable", "Account is unavailable", 403)
+            job = await self.owned(c, identity.user_id, job_id)
+            if account["deletion_state"] != "active" and not (
+                account["deletion_state"] == "deleting" and job["kind"] == "journal_delete"
+            ):
+                raise APIError("account_unavailable", "Account is unavailable", 403)
+            return await self.view(c, account, job)
 
     async def retry(self, identity, job_id, payload, key):
         async with self.db.tenant_transaction(identity.user_id) as c:

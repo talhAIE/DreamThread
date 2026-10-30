@@ -26,9 +26,11 @@ from app.schemas.continuity import (
     ConnectionRead,
     ContinuityOutput,
 )
+from app.services.accounts import active_account
 from app.services.evidence import OutputInvalid, verify_citation
 from app.services.journal import current_source, owned_dream
 from app.services.retrieval import RetrievalService, lexical_rank, snippet
+from app.workers.types import SourceChanged
 
 PROMPTS = Path(__file__).parents[1] / "prompts"
 
@@ -335,25 +337,45 @@ class ContinuityTools:
                     CONN.c.dream_b_id,
                     CONN.c.relation_key,
                     CONN.c.observation,
+                    CONN.c.basis_versions,
                 ).where(
                     CONN.c.user_id == self.user_id,
                     or_(CONN.c.dream_a_id == d_id, CONN.c.dream_b_id == d_id),
                     CONN.c.status == "confirmed",
                 )
+                .order_by(CONN.c.updated_at.desc(), CONN.c.id)
+                .limit(20)
             )
         ).mappings().all()
 
-        return [
-            {
-                "connection_id": str(r["id"]),
-                "connected_dream_id": str(
-                    r["dream_b_id"] if r["dream_a_id"] == d_id else r["dream_a_id"]
-                ),
-                "relation_key": r["relation_key"],
-                "observation": r["observation"],
-            }
-            for r in rows
-        ]
+        results = []
+        for row in rows:
+            versions = row["basis_versions"] or {}
+            try:
+                dream_a = await owned_dream(c, self.user_id, row["dream_a_id"])
+                source_a = await current_source(c, dream_a)
+                dream_b = await owned_dream(c, self.user_id, row["dream_b_id"])
+                source_b = await current_source(c, dream_b)
+            except APIError:
+                continue
+            if (
+                versions.get("dream_a_revision_id") != str(dream_a["current_revision_id"])
+                or versions.get("dream_b_revision_id") != str(dream_b["current_revision_id"])
+                or versions.get("dream_a_source_hash") != source_a["content_hash"]
+                or versions.get("dream_b_source_hash") != source_b["content_hash"]
+            ):
+                continue
+            results.append(
+                {
+                    "connection_id": str(row["id"]),
+                    "connected_dream_id": str(
+                        row["dream_b_id"] if row["dream_a_id"] == d_id else row["dream_a_id"]
+                    ),
+                    "relation_key": row["relation_key"],
+                    "observation": row["observation"],
+                }
+            )
+        return results
 
     async def execute_tool(self, name: str, args: dict) -> dict:
         if name == "search_dreams":
@@ -383,20 +405,27 @@ class ContinuityEngine:
 
     async def compare(
         self,
-        c,
         user_id: UUID,
         target_dream_id: UUID,
         candidate_limit: int | None = None,
         record_call=None,
     ) -> list[dict]:
-        target_dream = await owned_dream(c, user_id, target_dream_id)
-        target_source = await current_source(c, target_dream)
+        async with self.db.tenant_transaction(user_id) as c:
+            account = await active_account(c, user_id)
+            target_dream = await owned_dream(c, user_id, target_dream_id)
+            target_source = await current_source(c, target_dream)
+            archive_version = account["archive_version"]
 
         retrieval = RetrievalService(self.db, self.settings)
         from app.auth.identity import Identity
 
         identity = Identity(user_id, False)
         candidate_res = await retrieval.candidates(identity, target_dream_id)
+        if (
+            candidate_res.archive_version != archive_version
+            or candidate_res.revision_id != target_dream["current_revision_id"]
+        ):
+            raise SourceChanged
 
         if not candidate_res.candidates:
             return []
@@ -446,7 +475,6 @@ class ContinuityEngine:
             },
         ]
 
-        tools = ContinuityTools(c, user_id, self.settings)
         proposals: list[ComparisonProposal] = []
         rounds = 0
         tool_invocations = 0
@@ -496,7 +524,7 @@ class ContinuityEngine:
                     tool_invocations += 1
                     try:
                         args = json.loads(tc.function.arguments)
-                    except Exception:
+                    except (json.JSONDecodeError, TypeError):
                         args = {}
 
                     if tc.function.name == "propose_comparison":
@@ -506,7 +534,9 @@ class ContinuityEngine:
                         except ValidationError:
                             pass
 
-                    tool_result = await tools.execute_tool(tc.function.name, args)
+                    async with self.db.tenant_transaction(user_id) as tool_connection:
+                        tools = ContinuityTools(tool_connection, user_id, self.settings)
+                        tool_result = await tools.execute_tool(tc.function.name, args)
                     messages.append(
                         {
                             "role": "tool",
@@ -525,9 +555,19 @@ class ContinuityEngine:
                     pass
                 break
 
-        verified_connections = await self._verify_and_persist(
-            c, user_id, target_dream_id, target_source, proposals, model_run_id
-        )
+        async with self.db.tenant_transaction(user_id) as c:
+            current_account = await active_account(c, user_id)
+            current_target = await owned_dream(c, user_id, target_dream_id)
+            current_target_source = await current_source(c, current_target)
+            if (
+                current_account["archive_version"] != archive_version
+                or current_target["current_revision_id"] != target_dream["current_revision_id"]
+                or current_target_source["content_hash"] != target_source["content_hash"]
+            ):
+                raise SourceChanged
+            verified_connections = await self._verify_and_persist(
+                c, user_id, target_dream_id, target_source, proposals, model_run_id
+            )
         return verified_connections
 
     async def _verify_and_persist(
@@ -548,7 +588,7 @@ class ContinuityEngine:
             try:
                 candidate_dream = await owned_dream(c, user_id, p.candidate_dream_id)
                 candidate_source = await current_source(c, candidate_dream)
-            except Exception:
+            except APIError:
                 continue
 
             try:
@@ -574,7 +614,7 @@ class ContinuityEngine:
                 if not q:
                     continue
                 start_idx = src_a["text"].find(q)
-                if start_idx < 0:
+                if start_idx < 0 or src_a["text"].find(q, start_idx + 1) >= 0:
                     continue
                 end_idx = start_idx + len(q)
                 citation = Citation(
@@ -808,8 +848,11 @@ class ContinuityService:
                 )
                 .order_by(CONN.c.created_at.desc())
             )
-            if not include_rejected:
-                stmt = stmt.where(CONN.c.status != "rejected")
+            statuses = ("suggested", "confirmed", "rejected") if include_rejected else (
+                "suggested",
+                "confirmed",
+            )
+            stmt = stmt.where(CONN.c.status.in_(statuses))
 
             rows = (await c.execute(stmt)).mappings().all()
 
@@ -829,7 +872,10 @@ class ContinuityService:
 
                 evidence_count = await c.scalar(
                     select(CONN_EVID.c.id)
-                    .where(CONN_EVID.c.connection_id == r["id"])
+                    .where(
+                        CONN_EVID.c.user_id == user_id,
+                        CONN_EVID.c.connection_id == r["id"],
+                    )
                 )
 
                 results.append(
@@ -862,6 +908,7 @@ class ContinuityService:
         self, user_id: UUID, connection_id: UUID, patch: ConnectionPatchRequest
     ) -> ConnectionRead:
         async with self.db.tenant_transaction(user_id) as c:
+            await active_account(c, user_id)
             conn = (
                 await c.execute(
                     select(
@@ -875,7 +922,9 @@ class ContinuityService:
                         CONN.c.model_run_id,
                         CONN.c.created_at,
                         CONN.c.updated_at,
-                    ).where(CONN.c.id == connection_id, CONN.c.user_id == user_id)
+                    )
+                    .where(CONN.c.id == connection_id, CONN.c.user_id == user_id)
+                    .with_for_update()
                 )
             ).mappings().first()
 
@@ -890,6 +939,7 @@ class ContinuityService:
                         DEC.c.dream_b_id == conn["dream_b_id"],
                         DEC.c.relation_key == conn["relation_key"],
                     )
+                    .with_for_update()
                 )
             ).mappings().first()
 
@@ -919,13 +969,48 @@ class ContinuityService:
 
             await c.execute(
                 update(CONN)
-                .where(CONN.c.id == connection_id)
+                .where(CONN.c.id == connection_id, CONN.c.user_id == user_id)
                 .values(status=patch.decision)
             )
 
+            if patch.decision != conn["status"]:
+                stories = tables["app.storylines"]
+                jobs = tables["app.jobs"]
+                await c.execute(
+                    update(stories)
+                    .where(stories.c.user_id == user_id)
+                    .values(status="stale")
+                )
+                await c.execute(
+                    update(jobs)
+                    .where(
+                        jobs.c.user_id == user_id,
+                        jobs.c.kind == "storyline_refresh",
+                        jobs.c.status.in_(("queued", "running")),
+                    )
+                    .values(
+                        status="cancelled",
+                        stage="superseded",
+                        error_code="continuity_changed",
+                        lease_token=None,
+                        leased_until=None,
+                        deadline_at=None,
+                        stage_deadline_at=None,
+                    )
+                )
+                await c.execute(
+                    update(tables["app.accounts"])
+                    .where(tables["app.accounts"].c.id == user_id)
+                    .values(
+                        archive_version=tables["app.accounts"].c.archive_version + 1
+                    )
+                )
+
             updated_conn = (
                 await c.execute(
-                    select(CONN).where(CONN.c.id == connection_id)
+                    select(CONN).where(
+                        CONN.c.id == connection_id, CONN.c.user_id == user_id
+                    )
                 )
             ).mappings().first()
 
@@ -949,14 +1034,64 @@ class ContinuityService:
         self, user_id: UUID, connection_id: UUID
     ) -> ConnectionEvidenceListResponse:
         async with self.db.tenant_transaction(user_id) as c:
+            await active_account(c, user_id)
             conn = (
                 await c.execute(
-                    select(CONN.c.id).where(CONN.c.id == connection_id, CONN.c.user_id == user_id)
+                    select(
+                        CONN.c.id,
+                        CONN.c.dream_a_id,
+                        CONN.c.dream_b_id,
+                        CONN.c.basis_versions,
+                        CONN.c.status,
+                    ).where(CONN.c.id == connection_id, CONN.c.user_id == user_id)
                 )
             ).mappings().first()
 
             if not conn:
                 raise APIError("not_found", "Connection not found", 404)
+            if conn["status"] not in {"suggested", "confirmed"}:
+                raise APIError("stale_evidence", "Connection evidence is no longer current", 409)
+
+            endpoints = (
+                await c.execute(
+                    select(
+                        D.c.id,
+                        D.c.current_revision_id,
+                        R.c.content_hash,
+                    )
+                    .join(
+                        R,
+                        and_(
+                            R.c.user_id == D.c.user_id,
+                            R.c.dream_id == D.c.id,
+                            R.c.id == D.c.current_revision_id,
+                        ),
+                    )
+                    .where(
+                        D.c.user_id == user_id,
+                        D.c.id.in_([conn["dream_a_id"], conn["dream_b_id"]]),
+                        D.c.lifecycle == "saved",
+                        D.c.deleted_at.is_(None),
+                    )
+                )
+            ).mappings().all()
+            current_by_dream = {
+                row["id"]: (str(row["current_revision_id"]), row["content_hash"])
+                for row in endpoints
+            }
+            versions = conn["basis_versions"] or {}
+            if (
+                len(current_by_dream) != 2
+                or versions.get("dream_a_revision_id")
+                != current_by_dream.get(conn["dream_a_id"], (None, None))[0]
+                or versions.get("dream_b_revision_id")
+                != current_by_dream.get(conn["dream_b_id"], (None, None))[0]
+                or versions.get("dream_a_source_hash")
+                != current_by_dream.get(conn["dream_a_id"], (None, None))[1]
+                or versions.get("dream_b_source_hash")
+                != current_by_dream.get(conn["dream_b_id"], (None, None))[1]
+            ):
+                raise APIError("stale_evidence", "Connection evidence is no longer current", 409)
 
             rows = (
                 await c.execute(
@@ -968,6 +1103,8 @@ class ContinuityService:
                         EVID.c.end,
                         EVID.c.exact_quote,
                         EVID.c.content_hash,
+                        R.c.text,
+                        R.c.content_hash.label("revision_hash"),
                     )
                     .join(
                         CONN_EVID,
@@ -976,23 +1113,80 @@ class ContinuityService:
                             CONN_EVID.c.user_id == user_id,
                         ),
                     )
-                    .where(CONN_EVID.c.connection_id == connection_id)
+                    .join(
+                        D,
+                        and_(
+                            D.c.user_id == EVID.c.user_id,
+                            D.c.id == EVID.c.dream_id,
+                            D.c.current_revision_id == EVID.c.revision_id,
+                            D.c.lifecycle == "saved",
+                            D.c.deleted_at.is_(None),
+                        ),
+                    )
+                    .join(
+                        R,
+                        and_(
+                            R.c.user_id == EVID.c.user_id,
+                            R.c.dream_id == EVID.c.dream_id,
+                            R.c.id == EVID.c.revision_id,
+                        ),
+                    )
+                    .where(
+                        CONN_EVID.c.user_id == user_id,
+                        CONN_EVID.c.connection_id == connection_id,
+                        EVID.c.user_id == user_id,
+                        EVID.c.dream_id.in_([conn["dream_a_id"], conn["dream_b_id"]]),
+                        D.c.user_id == user_id,
+                        R.c.user_id == user_id,
+                    )
                     .order_by(EVID.c.dream_id, EVID.c.start)
                 )
             ).mappings().all()
 
-            evidence_items = [
-                ConnectionEvidenceRead(
-                    id=r["id"],
-                    dream_id=r["dream_id"],
-                    revision_id=r["revision_id"],
-                    start=r["start"],
-                    end=r["end"],
-                    exact_quote=r["exact_quote"],
-                    content_hash=r["content_hash"],
+            evidence_items = []
+            for row in rows:
+                if (
+                    not 0 <= row["start"] < row["end"] <= len(row["text"])
+                    or row["text"][row["start"] : row["end"]] != row["exact_quote"]
+                ):
+                    raise APIError(
+                        "stale_evidence", "Connection evidence failed source verification", 409
+                    )
+                citation = Citation(
+                    dream_id=row["dream_id"],
+                    revision_id=row["revision_id"],
+                    source_hash=row["content_hash"],
+                    start=row["start"],
+                    end=row["end"],
+                    quote=row["exact_quote"],
                 )
-                for r in rows
-            ]
+                if row["content_hash"] != row["revision_hash"]:
+                    raise APIError(
+                        "stale_evidence", "Connection evidence failed source verification", 409
+                    )
+                try:
+                    verify_citation(
+                        citation,
+                        dream_id=row["dream_id"],
+                        revision_id=row["revision_id"],
+                        source_hash=row["revision_hash"],
+                        text=row["text"],
+                    )
+                except OutputInvalid:
+                    raise APIError(
+                        "stale_evidence", "Connection evidence failed source verification", 409
+                    ) from None
+                evidence_items.append(
+                    ConnectionEvidenceRead(
+                        id=row["id"],
+                        dream_id=row["dream_id"],
+                        revision_id=row["revision_id"],
+                        start=row["start"],
+                        end=row["end"],
+                        exact_quote=row["exact_quote"],
+                        content_hash=row["content_hash"],
+                    )
+                )
 
             return ConnectionEvidenceListResponse(
                 connection_id=connection_id,
@@ -1000,6 +1194,10 @@ class ContinuityService:
             )
 
     async def analyze_connections(self, user_id: UUID, dream_id: UUID) -> ConnectionListResponse:
-        async with self.db.tenant_transaction(user_id) as c:
-            await self.engine.compare(c, user_id, dream_id)
+        try:
+            await self.engine.compare(user_id, dream_id)
+        except SourceChanged as error:
+            raise APIError(
+                "source_changed", "Dream changed during connection analysis", 409
+            ) from error
         return await self.get_connections_for_dream(user_id, dream_id)

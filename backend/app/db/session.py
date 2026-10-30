@@ -31,20 +31,26 @@ class Database:
         )
 
     @asynccontextmanager
-    async def tenant_transaction(self, verified_user_id: UUID):
+    async def tenant_transaction(
+        self, verified_user_id: UUID, *, isolation_level: str | None = None
+    ):
         """Only pass identity obtained from verified auth or an owned persisted job.
 
         PostgreSQL custom settings are an application trust boundary, not authentication.
         Never expose arbitrary SQL or this identity argument to clients/models.
         """
         user_id = str(UUID(str(verified_user_id)))
-        async with self.engine.begin() as connection:
-            await connection.execute(
-                text("SELECT set_config('app.user_id', :user_id, true)"), {"user_id": user_id}
-            )
-            await connection.execute(text("SET LOCAL search_path TO app, extensions, public"))
-            await connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
-            yield connection
+        async with self.engine.connect() as connection:
+            if isolation_level is not None:
+                await connection.execution_options(isolation_level=isolation_level)
+            async with connection.begin():
+                await connection.execute(
+                    text("SELECT set_config('app.user_id', :user_id, true)"),
+                    {"user_id": user_id},
+                )
+                await connection.execute(text("SET LOCAL search_path TO app, extensions, public"))
+                await connection.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+                yield connection
 
     async def probe(self) -> str:
         try:
@@ -90,7 +96,12 @@ class Database:
                     )
                     if revisions != {self.expected}:
                         return "schema_mismatch"
-                    if self.expected in {"0005_embedding_spaces", "0006_personal_memory"}:
+                    if self.expected in {
+                        "0005_embedding_spaces",
+                        "0006_personal_memory",
+                        "0007_insights_privacy",
+                        "0008_request_rate_limits",
+                    }:
                         # Versioned spaces enforce their own dimensions. The legacy fixed-size
                         # vector column is retained for migration compatibility, never searched.
                         if self.dimensions is not None and not 1 <= self.dimensions <= 16000:

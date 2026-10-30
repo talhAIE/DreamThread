@@ -3,12 +3,20 @@
 import asyncio
 import logging
 
+from app.errors import APIError
 from app.services.indexing import EmbeddingPublication
 from app.workers.handlers import default_handlers
 from app.workers.store import Store
 from app.workers.types import LeaseLost, Publication, SourceChanged, WorkFailure, classify
 
 logger = logging.getLogger("dreamthread.worker")
+DURABLE_JOB_KINDS = {
+    "detective_answer",
+    "storyline_refresh",
+    "time_capsule_refresh",
+    "export",
+    "journal_delete",
+}
 
 
 class Worker:
@@ -18,11 +26,17 @@ class Worker:
         self.handlers = default_handlers(settings, db=db) if handlers is None else handlers
 
     async def _execute(self, job, state):
+        handler = self.handlers.get(job["kind"])
+        if job["kind"] in DURABLE_JOB_KINDS:
+            if handler is None:
+                raise WorkFailure("unsupported_job")
+            async with asyncio.timeout(self.settings.job_timeout_seconds):
+                await handler.run(job)
+            return
         execution = await self.store.prepare(job)
         if execution is None:
             return  # deferred quota; lease was released atomically
         state["execution"] = execution
-        handler = self.handlers.get(job["kind"])
         if handler is None:
             raise WorkFailure("unsupported_job")
         async with asyncio.timeout(self.settings.job_timeout_seconds):
@@ -56,12 +70,28 @@ class Worker:
         except LeaseLost:
             logger.info("lease_lost job_id=%s", job["id"])
         except SourceChanged:
-            await self.store.cancel(job)
+            handler = self.handlers.get(job["kind"])
+            if job["kind"] in DURABLE_JOB_KINDS:
+                await handler.cancel(job)
+            else:
+                await self.store.cancel(job)
         except Exception as error:
             failure = classify(error)
             execution = state.get("execution")
             try:
-                await self.store.fail(job, failure, execution.sources if execution else ())
+                if (
+                    job["kind"] in DURABLE_JOB_KINDS
+                    and isinstance(error, APIError)
+                    and error.status < 500
+                ):
+                    failure = WorkFailure("invalid_output")
+                handler = self.handlers.get(job["kind"])
+                if job["kind"] in DURABLE_JOB_KINDS:
+                    await handler.fail(job, failure)
+                else:
+                    await self.store.fail(
+                        job, failure, execution.sources if execution else ()
+                    )
             except SourceChanged:
                 await self.store.cancel(job)
             except LeaseLost:
@@ -83,7 +113,11 @@ class Worker:
     async def maintain_once(self):
         for candidate in await self.queue.maintenance_candidates():
             try:
-                await self.store.maintain(candidate)
+                handler = self.handlers.get(candidate["kind"])
+                if candidate["kind"] in DURABLE_JOB_KINDS:
+                    await handler.maintain(candidate)
+                else:
+                    await self.store.maintain(candidate)
             except LeaseLost:
                 continue
 

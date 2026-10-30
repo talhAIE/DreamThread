@@ -11,10 +11,15 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.api.body_limit import BodyLimitMiddleware
 from app.api.connections import router as connections_router
+from app.api.constellation import router as constellation_router
+from app.api.conversations import messages_router
+from app.api.conversations import router as conversations_router
 from app.api.dreams import router as dreams_router
+from app.api.insights import router as insights_router
 from app.api.jobs import router as jobs_router
 from app.api.me import router as me_router
 from app.api.memory import router as memory_router
+from app.api.privacy import router as privacy_router
 from app.auth.identity import SupabaseIdentity
 from app.config import Settings
 from app.db import Database
@@ -111,6 +116,11 @@ def create_app(
     app.include_router(jobs_router, prefix=settings.api_prefix)
     app.include_router(memory_router, prefix=settings.api_prefix)
     app.include_router(connections_router, prefix=settings.api_prefix)
+    app.include_router(constellation_router, prefix=settings.api_prefix)
+    app.include_router(conversations_router, prefix=settings.api_prefix)
+    app.include_router(messages_router, prefix=settings.api_prefix)
+    app.include_router(insights_router, prefix=settings.api_prefix)
+    app.include_router(privacy_router, prefix=settings.api_prefix)
 
     @app.get("/health/live", tags=["Health"])
     async def live():

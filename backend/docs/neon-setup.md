@@ -57,7 +57,7 @@ Recommended application settings (already in .env.example):
 
 ```dotenv
 APP_ENV=development
-EXPECTED_SCHEMA_REVISION=0006_personal_memory
+EXPECTED_SCHEMA_REVISION=0008_request_rate_limits
 PROMPT_VERSION=v2
 EMBEDDING_VERSION=v1
 CORS_ORIGINS=["http://localhost:3000"]
@@ -192,10 +192,30 @@ create or delete any Neon database. The frontend is a separate service.
 - Failed embedding/reflection: use job error codes and the opt-in provider probes; database
   readiness alone does not prove provider availability or real model output quality.
 
-Run offline tests with uv run pytest -m 'not integration'. CI retains disposable PostgreSQL
-containers for destructive migration/RLS tests; you do not need to run a local database. Never
-point TEST_ADMIN_DATABASE_URL at your application Neon database. Hosted acceptance uses a
-separate Neon branch, check_neon.py --live, and an authenticated app smoke journey.
+Run unit/API tests with `uv run pytest -m 'not integration'`. Real migration/RLS tests require a
+disposable PostgreSQL 18.4 cluster with pgvector available in the `extensions` schema. The test
+fixture creates a uniquely named `dt_test_<suffix>` database and four uniquely named login roles,
+then drops only those generated resources. It also creates the standard `anon`,
+`authenticated`, and `service_role` NOLOGIN roles only if they are absent; those shared roles are
+not removed. The cluster administrator URL must connect directly to a maintenance database and
+have permission to create/drop databases and roles and install pgvector in the newly created test
+database. Do not use any application, production, or shared user-data database for this setting.
+
+Set `TEST_ADMIN_DATABASE_URL` only in the test process environment, using a private URL for that
+disposable cluster, then run all database integration tests:
+
+```powershell
+$env:TEST_ADMIN_DATABASE_URL = "postgresql+psycopg://<test-admin>:<password>@<test-host>/<maintenance-db>"
+uv run pytest -m integration -q
+Remove-Item Env:TEST_ADMIN_DATABASE_URL
+```
+
+The integration fixture runs the complete Alembic chain and exercises tenant RLS, migrations,
+worker leases/races, transaction behavior, deletion and idempotency. Never point
+`TEST_ADMIN_DATABASE_URL` at the application Neon database. If a local PostgreSQL server or
+Docker is unavailable, provision a separate disposable PostgreSQL 18.4/pgvector cluster first;
+do not substitute SQLite or a production Neon branch. Hosted acceptance uses a separate Neon
+branch, `check_neon.py --live`, and an authenticated app smoke journey.
 
 Source references: [Neon roles](https://neon.com/docs/manage/roles),
 [pgvector support](https://neon.com/docs/extensions/pgvector),

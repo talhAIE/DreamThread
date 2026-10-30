@@ -17,6 +17,20 @@ async def invalidate_history(connection, user_id):
     await connection.execute(
         update(summaries).where(summaries.c.user_id == user_id).values(state="stale", summary={})
     )
+    await connection.execute(
+        delete(tables["app.summary_evidence"]).where(
+            tables["app.summary_evidence"].c.user_id == user_id
+        )
+    )
+    exports = tables["app.exports"]
+    await connection.execute(
+        update(exports)
+        .where(
+            exports.c.user_id == user_id,
+            exports.c.status.in_(("pending", "ready")),
+        )
+        .values(status="stale", content=None)
+    )
     stories = tables["app.storylines"]
     await connection.execute(
         update(stories).where(stories.c.user_id == user_id).values(status="stale")

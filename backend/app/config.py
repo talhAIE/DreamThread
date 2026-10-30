@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     db_connect_timeout_seconds: int = Field(default=15, ge=3, le=60)
     db_pool_recycle_seconds: int = Field(default=300, ge=30, le=3600)
     queue_pool_size: int = Field(default=1, ge=1, le=5)
-    expected_schema_revision: str = "0006_personal_memory"
+    expected_schema_revision: str = "0008_request_rate_limits"
     supabase_url: str | None = None
     supabase_publishable_key: SecretStr | None = None
     supabase_secret_key: SecretStr | None = None
@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     worker_concurrency: int = Field(default=2, ge=1, le=16)
     auth_timeout_seconds: float = Field(default=5, gt=0, le=30)
     max_request_bytes: int = Field(default=131072, ge=1024, le=1048576)
+    user_request_rate_limit: int = Field(default=120, ge=10, le=10000)
     ai_daily_limit: int = Field(default=100, ge=1, le=10000)
     anonymous_ai_daily_limit: int = Field(default=5, ge=1, le=100)
     job_lease_seconds: float = Field(default=120, gt=0, le=600)
@@ -87,6 +88,15 @@ class Settings(BaseSettings):
         if value and urlsplit(value).path not in {"", "/"}:
             raise ValueError("Supabase URL must be a project origin without an API path")
         return value.rstrip("/") if value else None
+
+    @field_validator("voice_enabled")
+    @classmethod
+    def reject_unavailable_voice(cls, value: bool) -> bool:
+        if value:
+            raise ValueError(
+                "Voice is disabled until private storage and speech processing are verified"
+            )
+        return False
 
     @field_validator("database_url", "queue_database_url")
     @classmethod
@@ -205,4 +215,5 @@ class Settings(BaseSettings):
                 if self.supabase_url and self.supabase_publishable_key
                 else "not_configured"
             ),
+            "voice": "disabled_unverified",
         }

@@ -1,6 +1,7 @@
 """Unit and contract tests for Phase 9: Dream Continuity Engine."""
 
 import hashlib
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,6 +14,7 @@ from app.schemas.continuity import (
     ConnectionPatchRequest,
     ConnectionRead,
 )
+from app.services import continuity as continuity_module
 from app.services.continuity import (
     ContinuityEngine,
     ContinuityService,
@@ -21,6 +23,7 @@ from app.services.continuity import (
     canonical_relation_key,
 )
 from app.services.evidence import OutputInvalid, verify_citation
+from app.workers.types import SourceChanged
 
 
 def test_canonical_pair_ordering_and_self_link_rejection():
@@ -184,6 +187,115 @@ class MockDbCursor:
         return self._rows[0]
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("change_during_call", [False, True])
+async def test_continuity_model_calls_run_without_open_database_transactions(
+    monkeypatch, change_during_call
+):
+    user_id, target_id, revision_id = uuid4(), uuid4(), uuid4()
+    dream = {
+        "id": target_id,
+        "user_id": user_id,
+        "title": "Target",
+        "dream_date": "2026-01-01",
+        "current_revision_id": revision_id,
+    }
+    source = {
+        "id": revision_id,
+        "revision_id": revision_id,
+        "content_hash": "source-hash",
+        "text": "A source dream.",
+    }
+
+    class Transaction:
+        def __init__(self, database):
+            self.database = database
+
+        async def __aenter__(self):
+            self.database.active_transactions += 1
+            return object()
+
+        async def __aexit__(self, *_args):
+            self.database.active_transactions -= 1
+
+    class Database:
+        active_transactions = 0
+
+        def tenant_transaction(self, _user_id):
+            return Transaction(self)
+
+    database = Database()
+    archive = {"version": 1}
+
+    async def active_account(_connection, _user_id):
+        return {"archive_version": archive["version"]}
+
+    async def owned_dream(_connection, _user_id, _dream_id):
+        return dream
+
+    async def current_source(_connection, _dream):
+        return source
+
+    class Retrieval:
+        def __init__(self, *_args):
+            pass
+
+        async def candidates(self, *_args):
+            return SimpleNamespace(
+                revision_id=revision_id,
+                archive_version=1,
+                candidates=[
+                    SimpleNamespace(
+                        dream_id=uuid4(),
+                        title="Candidate",
+                        dream_date="2025-01-01",
+                        snippet="A candidate.",
+                        reasons=[],
+                    )
+                ]
+            )
+
+    class Provider:
+        calls = 0
+
+        async def complete(self, *_args, **_kwargs):
+            assert database.active_transactions == 0
+            self.calls += 1
+            if change_during_call:
+                archive["version"] = 2
+            if self.calls == 1:
+                tool_call = SimpleNamespace(
+                    id="tool-1",
+                    function=SimpleNamespace(name="unknown_tool", arguments="{}"),
+                )
+                return SimpleNamespace(text=None, run_id=uuid4(), tool_calls=[tool_call])
+            return SimpleNamespace(
+                text='{"comparisons":[]}', run_id=uuid4(), tool_calls=[]
+            )
+
+    monkeypatch.setattr(continuity_module, "active_account", active_account)
+    monkeypatch.setattr(continuity_module, "owned_dream", owned_dream)
+    monkeypatch.setattr(continuity_module, "current_source", current_source)
+    monkeypatch.setattr(continuity_module, "RetrievalService", Retrieval)
+    settings = SimpleNamespace(
+        agent_max_candidate_dreams=3,
+        agent_max_rounds=2,
+        agent_max_tool_calls=1,
+        nebius_reasoning_model=None,
+    )
+    provider = Provider()
+
+    if change_during_call:
+        with pytest.raises(SourceChanged):
+            await ContinuityEngine(database, settings, provider).compare(user_id, target_id)
+    else:
+        result = await ContinuityEngine(database, settings, provider).compare(user_id, target_id)
+        assert result == []
+
+    assert provider.calls == 2
+    assert database.active_transactions == 0
+
+
 class MockConnection:
     def __init__(self, user_id):
         self.user_id = user_id
@@ -200,6 +312,10 @@ class MockConnection:
         self.calls.append(stmt)
         sql = str(stmt).casefold()
 
+        if "from app.accounts" in sql:
+            return MockDbCursor(
+                [{"id": self.user_id, "deletion_state": "active", "archive_version": 1}]
+            )
         if "from app.dreams" in sql:
             params = {}
             if hasattr(stmt, "compile"):
@@ -480,7 +596,7 @@ async def test_entailment_screening_rejects_unverified_quotes():
     d1 = UUID("11111111-1111-1111-1111-111111111111")
     d2 = UUID("22222222-2222-2222-2222-222222222222")
 
-    text1 = "I was running along a sandy beach."
+    text1 = "I was running along a sandy beach, then returned to the sandy beach."
     text2 = "A red car was parked beside a tall tree."
 
     source1 = {
@@ -520,7 +636,7 @@ async def test_entailment_screening_rejects_unverified_quotes():
     )
     engine = ContinuityEngine(None, settings)
 
-    # Proposal where candidate quote is fabricated
+    # One proposal has a fabricated quote; the other has an ambiguous repeated quote.
     proposals = [
         ComparisonProposal(
             target_dream_id=d1,
@@ -529,7 +645,15 @@ async def test_entailment_screening_rejects_unverified_quotes():
             similarity_observation="Both dreams are near the ocean.",
             quotes_target=["sandy beach"],
             quotes_candidate=["blue ocean wave"],  # DOES NOT EXIST in text2
-        )
+        ),
+        ComparisonProposal(
+            target_dream_id=d1,
+            candidate_dream_id=d2,
+            relation_key="theme:ambiguous",
+            similarity_observation="Both dreams mention a beach.",
+            quotes_target=["sandy beach"],
+            quotes_candidate=["red car"],
+        ),
     ]
 
     res = await engine._verify_and_persist(mock_conn, user_id, d1, source1, proposals, None)
@@ -638,3 +762,177 @@ async def test_patch_connection_version_conflict():
             user_id, uuid4(), ConnectionPatchRequest(decision="confirmed", expected_version=1)
         )
     assert err_404.value.status == 404
+
+
+class EvidenceResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return self
+
+    def one_or_none(self):
+        return self.rows[0] if self.rows else None
+
+    def first(self):
+        return self.rows[0] if self.rows else None
+
+    def all(self):
+        return self.rows
+
+
+class EvidenceConnection:
+    def __init__(self, user_id, *, mode="valid"):
+        self.user_id = user_id
+        self.mode = mode
+        self.dream_a, self.dream_b = uuid4(), uuid4()
+        self.revision_a, self.revision_b = uuid4(), uuid4()
+        self.evidence_id = uuid4()
+        self.text = "A silver river crossed the quiet forest."
+        self.content_hash = hashlib.sha256(self.text.encode()).hexdigest()
+        self.statements = []
+
+    async def execute(self, statement):
+        sql = str(statement)
+        self.statements.append(sql)
+        if "FROM app.accounts" in sql:
+            return EvidenceResult([{"id": self.user_id, "deletion_state": "active"}])
+        if "FROM app.connections" in sql:
+            if self.mode == "cross_tenant":
+                return EvidenceResult([])
+            status = "stale" if self.mode == "stale_connection" else "confirmed"
+            return EvidenceResult(
+                [
+                    {
+                        "id": uuid4(),
+                        "dream_a_id": self.dream_a,
+                        "dream_b_id": self.dream_b,
+                        "basis_versions": {
+                            "dream_a_revision_id": str(self.revision_a),
+                            "dream_b_revision_id": str(self.revision_b),
+                            "dream_a_source_hash": (
+                                "0" * 64
+                                if self.mode == "basis_hash_mismatch"
+                                else self.content_hash
+                            ),
+                            "dream_b_source_hash": self.content_hash,
+                        },
+                        "status": status,
+                    }
+                ]
+            )
+        if "FROM app.dreams" in sql and "app.evidence" not in sql:
+            if self.mode == "deleted":
+                return EvidenceResult(
+                    [
+                        {
+                            "id": self.dream_a,
+                            "current_revision_id": self.revision_a,
+                            "content_hash": self.content_hash,
+                        }
+                    ]
+                )
+            revision_b = uuid4() if self.mode == "changed_revision" else self.revision_b
+            return EvidenceResult(
+                [
+                    {
+                        "id": self.dream_a,
+                        "current_revision_id": self.revision_a,
+                        "content_hash": (
+                            hashlib.sha256(b"changed source").hexdigest()
+                            if self.mode == "modified_source"
+                            else self.content_hash
+                        ),
+                    },
+                    {
+                        "id": self.dream_b,
+                        "current_revision_id": revision_b,
+                        "content_hash": self.content_hash,
+                    },
+                ]
+            )
+        if "FROM app.evidence" in sql and "app.connection_evidence" in sql:
+            start = 100 if self.mode == "invalid_offsets" else self.text.index("silver")
+            quote = "not in source" if self.mode == "quote_mismatch" else "silver river"
+            content_hash = "0" * 64 if self.mode == "hash_mismatch" else self.content_hash
+            revision_hash = (
+                hashlib.sha256(b"changed source").hexdigest()
+                if self.mode == "modified_source"
+                else self.content_hash
+            )
+            source_text = "A changed source." if self.mode == "modified_source" else self.text
+            return EvidenceResult(
+                [
+                    {
+                        "id": self.evidence_id,
+                        "dream_id": self.dream_a,
+                        "revision_id": self.revision_a,
+                        "start": start,
+                        "end": start + len(quote),
+                        "exact_quote": quote,
+                        "content_hash": content_hash,
+                        "text": source_text,
+                        "revision_hash": revision_hash,
+                    }
+                ]
+            )
+        return EvidenceResult([])
+
+
+class EvidenceDatabase:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def tenant_transaction(self, _user_id):
+        class Transaction:
+            async def __aenter__(inner_self):
+                return self.connection
+
+            async def __aexit__(inner_self, *_args):
+                return None
+
+        return Transaction()
+
+
+@pytest.mark.anyio
+async def test_connection_evidence_returns_only_current_verified_source():
+    user_id = uuid4()
+    connection = EvidenceConnection(user_id)
+    service = ContinuityService(
+        EvidenceDatabase(connection),
+        Settings(_env_file=None, database_url="postgresql+psycopg://test@localhost/test"),
+    )
+
+    result = await service.get_connection_evidence(user_id, uuid4())
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].exact_quote == "silver river"
+    assert all("user_id" in statement for statement in connection.statements[1:])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "modified_source",
+        "deleted",
+        "changed_revision",
+        "basis_hash_mismatch",
+        "invalid_offsets",
+        "quote_mismatch",
+        "hash_mismatch",
+        "stale_connection",
+        "cross_tenant",
+    ],
+)
+async def test_connection_evidence_rejects_stale_or_invalid_sources(mode):
+    user_id = uuid4()
+    connection = EvidenceConnection(user_id, mode=mode)
+    service = ContinuityService(
+        EvidenceDatabase(connection),
+        Settings(_env_file=None, database_url="postgresql+psycopg://test@localhost/test"),
+    )
+
+    with pytest.raises(APIError) as error:
+        await service.get_connection_evidence(user_id, uuid4())
+    assert error.value.status in {404, 409}
