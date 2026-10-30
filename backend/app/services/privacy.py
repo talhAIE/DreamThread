@@ -728,6 +728,14 @@ class PrivacyService:
                     select(ASSETS.c.storage_key).where(ASSETS.c.user_id == user_id)
                 )
             ).scalars().all()
+            if assets and self.settings and self.settings.supabase_secret_key:
+                # New audio intents already persist their own cleanup fence before upload.
+                # Do not create an immediate duplicate deletion that could race a PUT.
+                registered = set((await c.execute(select(CLEANUP.c.operation_key).where(
+                    CLEANUP.c.user_id == user_id
+                ))).scalars().all())
+                assets = [key for key in assets if len(key.split('/')) < 2 or
+                          f"audio:{key.split('/')[1]}" not in registered]
             if assets:
                 await c.execute(
                     pg_insert(CLEANUP)
@@ -736,6 +744,10 @@ class PrivacyService:
                         operation_key=f"journal-delete:{job['data_epoch']}",
                         storage_keys=list(assets),
                         state="queued",
+                        not_before=now + timedelta(seconds=(
+                            self.settings.audio_upload_intent_ttl_seconds
+                            + self.settings.storage_timeout_seconds + 60
+                        )) if self.settings else now,
                     )
                     .on_conflict_do_nothing(
                         index_elements=[CLEANUP.c.user_id, CLEANUP.c.operation_key]

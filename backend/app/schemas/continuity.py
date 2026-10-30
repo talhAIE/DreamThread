@@ -9,6 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.schemas.identity import Contract
 
 
+class ContinuityAccepted(Contract):
+    job_id: UUID
+    status: str
+
+
 class ConnectionEvidenceRead(Contract):
     id: UUID
     dream_id: UUID

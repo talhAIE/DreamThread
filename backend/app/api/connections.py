@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Header, Query, Request
 
 from app.api.dependencies import CurrentIdentity
 from app.schemas.continuity import (
@@ -11,6 +11,7 @@ from app.schemas.continuity import (
     ConnectionListResponse,
     ConnectionPatchRequest,
     ConnectionRead,
+    ContinuityAccepted,
 )
 from app.services.continuity import ContinuityService
 
@@ -37,14 +38,17 @@ async def get_dream_connections(
     )
 
 
-@router.post("/dreams/{dream_id}/connections/analyze", response_model=ConnectionListResponse)
+@router.post(
+    "/dreams/{dream_id}/connections/analyze", response_model=ContinuityAccepted, status_code=202
+)
 async def analyze_dream_connections(
     request: Request,
     dream_id: UUID,
     identity: CurrentIdentity,
+    key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)],
 ):
     """Trigger continuity analysis connecting this dream with historical entries."""
-    return await service(request).analyze_connections(identity.user_id, dream_id)
+    return await service(request).enqueue_connections(identity, dream_id, key)
 
 
 @router.patch("/connections/{connection_id}", response_model=ConnectionRead)

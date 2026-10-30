@@ -16,6 +16,8 @@ DURABLE_JOB_KINDS = {
     "time_capsule_refresh",
     "export",
     "journal_delete",
+    "transcription",
+    "continuity",
 }
 
 
@@ -111,6 +113,10 @@ class Worker:
         return True
 
     async def maintain_once(self):
+        if self.settings.supabase_secret_key and hasattr(self.queue, "cleanup_candidates"):
+            from app.services.storage_cleanup import StorageCleanup
+
+            await StorageCleanup(self.store.db, self.settings).maintain(self.queue)
         for candidate in await self.queue.maintenance_candidates():
             try:
                 handler = self.handlers.get(candidate["kind"])

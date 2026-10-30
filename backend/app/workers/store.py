@@ -456,6 +456,24 @@ class Store:
             dream = self.guard(account, dreams, current, execution.sources)
             await self.check_hashes(c, execution.sources)
             await IndexService(self.db, self.settings).publish(c, execution, publication, dream)
+            # Continuity follows indexing and owns a separate fenced job. It must never
+            # overwrite the validated single-dream analysis with an empty publication.
+            preferences = tables["app.preferences"]
+            auto = await c.scalar(select(preferences.c.auto_connections).where(
+                preferences.c.user_id == execution.job["user_id"]
+            ))
+            if auto:
+                await c.execute(insert(J).values(
+                    user_id=execution.job["user_id"], kind="continuity",
+                    dedupe_key=f"{dream['current_revision_id']}:{account['archive_version']}:"
+                               f"{account['memory_version']}:{pipeline_version(self.settings)}",
+                    payload={"dream_id": str(dream["id"]),
+                             "revision_id": str(dream["current_revision_id"])},
+                    data_epoch=account["data_epoch"], input_versions={
+                        "archive_version": account["archive_version"],
+                        "memory_version": account["memory_version"],
+                    },
+                ).on_conflict_do_nothing(index_elements=[J.c.user_id, J.c.kind, J.c.dedupe_key]))
             await c.execute(
                 update(J)
                 .where(J.c.id == current["id"])

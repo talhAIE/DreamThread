@@ -37,7 +37,7 @@ class ContinuityHandler:
         from app.services.continuity import ContinuityEngine
 
         if self.db:
-j            engine = ContinuityEngine(self.db, self.settings, self.provider)
+            engine = ContinuityEngine(self.db, self.settings, self.provider)
             await engine.compare(
                 execution.job["user_id"],
                 execution.primary.dream_id,
@@ -53,6 +53,27 @@ class DurableJobHandler:
         self.db = db
 
     async def run(self, job):
+        if self.kind == "continuity":
+            from app.services.continuity import ContinuityEngine
+
+            async def record(**metadata):
+                async with self.db.tenant_transaction(job["user_id"]) as c:
+                    from app.services.accounts import active_account
+
+                    account = await active_account(c, job["user_id"])
+                    if account["data_epoch"] != job["data_epoch"]:
+                        from app.workers.types import SourceChanged
+
+                        raise SourceChanged
+                    return await c.scalar(tables["app.model_runs"].insert().values(
+                        user_id=job["user_id"], job_id=job["id"], prompt_version="continuity_v1",
+                        trace_stage="continuity", **metadata,
+                    ).returning(tables["app.model_runs"].c.id))
+
+            await ContinuityEngine(self.db, self.settings).compare(
+                job["user_id"], UUID(job["payload"]["dream_id"]), record_call=record, job=job
+            )
+            return
         if self.kind == "storyline_refresh":
             await ConstellationService(self.db).run_storyline_refresh(job)
             return
@@ -276,7 +297,7 @@ class DurableJobHandler:
                     )
                     .values(updated_at=func.now())
                 )
-            else:
+            elif self.kind == "storyline_refresh":
                 await c.execute(
                     update(ST)
                     .where(
@@ -291,11 +312,15 @@ def default_handlers(settings, db=None):
     handlers = {
         "analysis": AnalysisHandler(settings),
         "embedding": EmbeddingHandler(settings),
-        "continuity": ContinuityHandler(settings, db=db),
     }
     if db is not None:
+        if settings.voice_enabled:
+            from app.services.audio import AudioService
+
+            handlers["transcription"] = AudioService(db, settings)
         handlers.update(
             {
+                "continuity": DurableJobHandler("continuity", settings, db),
                 "detective_answer": DurableJobHandler("detective_answer", settings, db),
                 "storyline_refresh": DurableJobHandler("storyline_refresh", settings, db),
                 "time_capsule_refresh": DurableJobHandler("time_capsule_refresh", settings, db),

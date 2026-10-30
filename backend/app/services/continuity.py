@@ -4,13 +4,14 @@ Tool-bounded connection discovery, citation verification, canonical pair orderin
 and decision-preserving persistence.
 """
 
+import asyncio
 import json
 import re
 from pathlib import Path
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.db.models import tables
@@ -35,9 +36,29 @@ from app.services.retrieval import (
     ranked_current_sources,
     snippet,
 )
-from app.workers.types import SourceChanged
+from app.workers.types import LeaseLost, SourceChanged, WorkFailure
 
 PROMPTS = Path(__file__).parents[1] / "prompts"
+
+COMPARISON_STOPWORDS = set(
+    "the and that this with from into through were was are have had has felt feel dream dreams "
+    "then there their they them when where which about outside inside stood walked saw same "
+    "both one two very some what your mine just been being before after".split()
+)
+
+
+def grounded_comparison(quotes_a, quotes_b):
+    """A quote match alone cannot entail arbitrary model prose or psychological causes."""
+    def terms(quotes):
+        return {word for word in re.findall(r"[^\W\d_]+", " ".join(quotes).casefold())
+                if len(word) > 2 and word not in COMPARISON_STOPWORDS}
+
+    common = sorted(terms(quotes_a) & terms(quotes_b))[:6]
+    if not common:
+        return None
+    return "Both saved entries include " + ", ".join(repr(word) for word in common) + (
+        ". Compare the quoted details; shared wording alone does not establish shared meaning."
+    )
 
 CONN = tables["app.connections"]
 DEC = tables["app.connection_decisions"]
@@ -391,17 +412,35 @@ class ContinuityEngine:
         self.provider = provider or Nebius(settings)
 
     async def compare(
+        self, user_id, target_dream_id, candidate_limit=None, record_call=None, job=None
+    ):
+        try:
+            async with asyncio.timeout(getattr(self.settings, "agent_timeout_seconds", 90)):
+                return await self._compare(
+                    user_id, target_dream_id, candidate_limit, record_call, job
+                )
+        except TimeoutError:
+            raise WorkFailure("provider_timeout", retryable=True) from None
+
+    async def _compare(
         self,
         user_id: UUID,
         target_dream_id: UUID,
         candidate_limit: int | None = None,
         record_call=None,
+        job=None,
     ) -> list[dict]:
         async with self.db.tenant_transaction(user_id) as c:
             account = await active_account(c, user_id)
             target_dream = await owned_dream(c, user_id, target_dream_id)
             target_source = await current_source(c, target_dream)
             archive_version = account["archive_version"]
+            if job and (
+                account["data_epoch"] != job["data_epoch"]
+                or account["memory_version"] != job["input_versions"]["memory_version"]
+                or str(target_dream["current_revision_id"]) != job["payload"]["revision_id"]
+            ):
+                raise SourceChanged
 
         retrieval = RetrievalService(self.db, self.settings)
         from app.auth.identity import Identity
@@ -413,9 +452,6 @@ class ContinuityEngine:
             or candidate_res.revision_id != target_dream["current_revision_id"]
         ):
             raise SourceChanged
-
-        if not candidate_res.candidates:
-            return []
 
         limit = candidate_limit or self.settings.agent_max_candidate_dreams
         top_candidates = candidate_res.candidates[:limit]
@@ -479,7 +515,7 @@ class ContinuityEngine:
         recorder = record_call or dummy_record
         model_run_id = None
 
-        while rounds < max_rounds:
+        while top_candidates and rounds < max_rounds:
             rounds += 1
             completion = await self.provider.complete(
                 messages,
@@ -557,9 +593,28 @@ class ContinuityEngine:
                 or current_target_source["content_hash"] != target_source["content_hash"]
             ):
                 raise SourceChanged
+            if job:
+                jobs = tables["app.jobs"]
+                current = (await c.execute(select(jobs).where(
+                    jobs.c.id == job["id"], jobs.c.user_id == user_id
+                ).with_for_update())).mappings().one_or_none()
+                now = await c.scalar(select(func.clock_timestamp()))
+                if (not current or current["status"] != "running"
+                        or current["lease_token"] != job["lease_token"]
+                        or current["leased_until"] <= now or current["deadline_at"] <= now):
+                    raise LeaseLost
+                if (current_account["data_epoch"] != job["data_epoch"]
+                        or current_account["memory_version"] !=
+                        job["input_versions"]["memory_version"]):
+                    raise SourceChanged
             verified_connections = await self._verify_and_persist(
                 c, user_id, target_dream_id, target_source, proposals, model_run_id
             )
+            if job:
+                await c.execute(update(jobs).where(jobs.c.id == job["id"]).values(
+                    status="succeeded", stage="ready", error_code=None,
+                    lease_token=None, leased_until=None, deadline_at=None, stage_deadline_at=None,
+                ))
         return verified_connections
 
     async def _verify_and_persist(
@@ -574,6 +629,8 @@ class ContinuityEngine:
         saved_connections = []
 
         for p in proposals:
+            if p.target_dream_id != target_dream_id:
+                continue
             if p.target_dream_id == p.candidate_dream_id:
                 continue
 
@@ -661,6 +718,12 @@ class ContinuityEngine:
             # Claim entailment screening: must have at least one verified quote from each dream
             if not verified_citations_a or not verified_citations_b:
                 continue
+            observation = grounded_comparison(
+                [item.quote for item in verified_citations_a],
+                [item.quote for item in verified_citations_b],
+            )
+            if observation is None:
+                continue
 
             rel_key = canonical_relation_key(p.relation_key)
 
@@ -705,7 +768,7 @@ class ContinuityEngine:
                     .where(CONN.c.id == connection_id)
                     .values(
                         status=status,
-                        observation=p.similarity_observation,
+                        observation=observation,
                         basis_versions=basis_versions,
                         model_run_id=model_run_id,
                     )
@@ -720,39 +783,20 @@ class ContinuityEngine:
                         dream_b_id=dream_b_id,
                         relation_key=rel_key,
                         status=status,
-                        observation=p.similarity_observation,
+                        observation=observation,
                         basis_versions=basis_versions,
                         model_run_id=model_run_id,
                     )
                 )
 
             all_citations = verified_citations_a + verified_citations_b
+            # A refreshed connection must reference ONLY its current source revisions.
+            await c.execute(delete(CONN_EVID).where(
+                CONN_EVID.c.user_id == user_id, CONN_EVID.c.connection_id == connection_id
+            ))
             for cit in all_citations:
-                evid_id = uuid4()
-                await c.execute(
-                    insert(EVID)
-                    .values(
-                        id=evid_id,
-                        user_id=user_id,
-                        dream_id=cit.dream_id,
-                        revision_id=cit.revision_id,
-                        start=cit.start,
-                        end=cit.end,
-                        exact_quote=cit.quote,
-                        content_hash=cit.source_hash,
-                    )
-                    .on_conflict_do_nothing(
-                        index_elements=[
-                            EVID.c.user_id,
-                            EVID.c.dream_id,
-                            EVID.c.revision_id,
-                            EVID.c.start,
-                            EVID.c.end,
-                            EVID.c.content_hash,
-                        ]
-                    )
-                )
-
+                # The account row is locked by compare's publication transaction.
+                # Reuse an exact span without inventing a nonexistent UNIQUE constraint.
                 actual_evid_id = await c.scalar(
                     select(EVID.c.id).where(
                         EVID.c.user_id == user_id,
@@ -761,8 +805,15 @@ class ContinuityEngine:
                         EVID.c.start == cit.start,
                         EVID.c.end == cit.end,
                         EVID.c.content_hash == cit.source_hash,
-                    )
+                    ).order_by(EVID.c.id).limit(1)
                 )
+                if actual_evid_id is None:
+                    actual_evid_id = uuid4()
+                    await c.execute(insert(EVID).values(
+                        id=actual_evid_id, user_id=user_id, dream_id=cit.dream_id,
+                        revision_id=cit.revision_id, start=cit.start, end=cit.end,
+                        exact_quote=cit.quote, content_hash=cit.source_hash,
+                    ))
 
                 if actual_evid_id:
                     await c.execute(
@@ -789,7 +840,7 @@ class ContinuityEngine:
                     "dream_b_id": dream_b_id,
                     "relation_key": rel_key,
                     "status": status,
-                    "observation": p.similarity_observation,
+                    "observation": observation,
                 }
             )
 
@@ -804,10 +855,38 @@ class ContinuityService:
         self.settings = settings
         self.engine = ContinuityEngine(db, settings, provider)
 
+    async def enqueue_connections(self, identity, dream_id, key):
+        from app.schemas.continuity import ContinuityAccepted
+        from app.services.admission import reserve_ai
+
+        jobs = tables["app.jobs"]
+        async with self.db.tenant_transaction(identity.user_id) as c:
+            account = await active_account(c, identity.user_id)
+            dream = await owned_dream(c, identity.user_id, dream_id)
+            if dream["lifecycle"] != "saved":
+                raise APIError("invalid_transition", "Save the dream before comparing", 409)
+            admitted = await reserve_ai(c, identity, self.settings, route="continuity.analyze",
+                key=key, body={"dream_id": str(dream_id)})
+            if admitted.replayed:
+                row = (await c.execute(select(jobs).where(
+                    jobs.c.id == admitted.resource_id, jobs.c.user_id == identity.user_id
+                ))).mappings().one()
+            else:
+                row = (await c.execute(insert(jobs).values(
+                    id=admitted.resource_id, user_id=identity.user_id, kind="continuity",
+                    dedupe_key=str(admitted.resource_id), data_epoch=account["data_epoch"],
+                    payload={"dream_id": str(dream_id),
+                             "revision_id": str(dream["current_revision_id"])},
+                    input_versions={"archive_version": account["archive_version"],
+                                    "memory_version": account["memory_version"]},
+                ).returning(jobs))).mappings().one()
+            return ContinuityAccepted(job_id=row["id"], status=row["status"])
+
     async def get_connections_for_dream(
         self, user_id: UUID, dream_id: UUID, include_rejected: bool = False
     ) -> ConnectionListResponse:
         async with self.db.tenant_transaction(user_id) as c:
+            await active_account(c, user_id)
             await owned_dream(c, user_id, dream_id)
 
             stmt = (

@@ -5,7 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import and_, delete, insert, or_, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, update
 
 from app.db.models import tables
 from app.errors import APIError
@@ -346,7 +346,7 @@ class JournalService:
 
     async def create(self, identity, payload, key):
         async with self.db.tenant_transaction(identity.user_id) as c:
-            await active_account(c, identity.user_id)
+            account = await active_account(c, identity.user_id)
             admission = await reserve_resource(
                 c,
                 identity,
@@ -360,6 +360,26 @@ class JournalService:
                     c, await owned_dream(c, identity.user_id, admission.resource_id)
                 )
             dream_id = admission.resource_id
+            if payload.input_mode == "voice":
+                from app.services.audio import AudioService
+
+                audio = AudioService(self.db, self.settings)
+                audio.enabled()
+                asset = await audio.asset(c, identity.user_id, payload.audio_asset_id)
+                if (asset["lifecycle"] != "ready" or asset["expires_at"] <= datetime.now(UTC)
+                        or asset["verified_metadata"]["data_epoch"] != account["data_epoch"]):
+                    raise APIError("audio_not_ready", "Review a completed transcript first", 409)
+                assets, cleanup = tables["app.audio_assets"], tables["app.cleanup_tasks"]
+                await c.execute(update(assets).where(assets.c.id == asset["id"]).values(
+                    lifecycle="attached", verified_metadata={
+                        "data_epoch": asset["verified_metadata"]["data_epoch"],
+                        "dream_id": str(dream_id),
+                    },
+                ))
+                await c.execute(update(cleanup).where(
+                    cleanup.c.user_id == identity.user_id,
+                    cleanup.c.operation_key == f"audio:{asset['id']}",
+                ).values(not_before=func.now()))
             await c.execute(
                 insert(D).values(
                     id=dream_id,
@@ -367,6 +387,7 @@ class JournalService:
                     title=payload.title,
                     dream_date=payload.dream_date,
                     lifecycle=payload.lifecycle,
+                    input_mode=payload.input_mode,
                 )
             )
             revision_id = await self._revision(

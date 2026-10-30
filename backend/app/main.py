@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException
 from starlette.middleware.cors import CORSMiddleware
 
+from app.api.audio import router as audio_router
 from app.api.body_limit import BodyLimitMiddleware
 from app.api.connections import router as connections_router
 from app.api.constellation import router as constellation_router
@@ -62,9 +63,7 @@ def create_app(
         raise ValueError("Provide either 'database' or 'db', not both")
     db = database if database is not None else db
     db = db if db is not None else Database(settings)
-    authenticator = (
-        authenticator if authenticator is not None else SupabaseIdentity(settings)
-    )
+    authenticator = authenticator if authenticator is not None else SupabaseIdentity(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -91,7 +90,12 @@ def create_app(
             503: {"model": ErrorEnvelope},
         },
     )
-    app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
+    app.add_middleware(
+        BodyLimitMiddleware,
+        max_bytes=settings.max_request_bytes,
+        audio_prefix=settings.api_prefix + "/audio/" if settings.voice_enabled else None,
+        audio_max_bytes=settings.audio_max_bytes,
+    )
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(
         CORSMiddleware,
@@ -121,6 +125,8 @@ def create_app(
     app.include_router(messages_router, prefix=settings.api_prefix)
     app.include_router(insights_router, prefix=settings.api_prefix)
     app.include_router(privacy_router, prefix=settings.api_prefix)
+    if settings.voice_enabled:
+        app.include_router(audio_router, prefix=settings.api_prefix)
 
     @app.get("/health/live", tags=["Health"])
     async def live():

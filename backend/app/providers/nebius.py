@@ -23,7 +23,7 @@ class Nebius:
 
     def configured(self, model=None):
         settings = self.settings
-        chosen = model or settings.nebius_reasoning_model or settings.nebius_extraction_model
+        chosen = model or settings.nebius_extraction_model
         if not settings.nebius_api_key or not chosen:
             raise WorkFailure("provider_not_configured")
         model_name = chosen.casefold()
@@ -31,9 +31,18 @@ class Nebius:
             raise WorkFailure("provider_configuration")
 
     async def complete(self, messages, schema=None, *, task, record, model=None, tools=None):
-        self.configured(model=model)
         settings = self.settings
-        chosen_model = model or settings.nebius_reasoning_model or settings.nebius_extraction_model
+        chosen_model = (
+            model
+            or (settings.nebius_reasoning_model if task in {"continuity", "detective"} else None)
+            or settings.nebius_extraction_model
+        )
+        self.configured(model=chosen_model)
+        output_limit = (
+            settings.agent_max_output_tokens
+            if task in {"continuity", "detective"}
+            else settings.model_max_output_tokens
+        )
         # Deliberately conservative upper bound (one token per UTF-8 byte plus protocol headroom).
         schema_bytes = len(json.dumps(schema).encode()) if schema else 0
         tools_bytes = len(json.dumps(tools).encode()) if tools else 0
@@ -41,7 +50,7 @@ class Nebius:
             len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
             + schema_bytes
             + tools_bytes
-            + settings.model_max_output_tokens
+            + output_limit
             + 512
         )
         if estimated > settings.model_context_token_budget:
@@ -72,7 +81,7 @@ class Nebius:
                 request_kwargs = {
                     "model": chosen_model,
                     "messages": messages,
-                    "max_tokens": settings.model_max_output_tokens,
+                    "max_tokens": output_limit,
                     "temperature": 0,
                     "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}
                     if "nemotron-3-nano" in chosen_model.casefold()

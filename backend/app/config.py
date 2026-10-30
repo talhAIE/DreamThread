@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     db_connect_timeout_seconds: int = Field(default=15, ge=3, le=60)
     db_pool_recycle_seconds: int = Field(default=300, ge=30, le=3600)
     queue_pool_size: int = Field(default=1, ge=1, le=5)
-    expected_schema_revision: str = "0009_continuity_search_index"
+    expected_schema_revision: str = "0010_audio_cleanup"
     supabase_url: str | None = None
     supabase_publishable_key: SecretStr | None = None
     supabase_secret_key: SecretStr | None = None
@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     embedding_batch_byte_budget: int = Field(default=32768, ge=4096, le=262144)
     prompt_version: str = Field(default="v2", min_length=1, max_length=50)
     voice_enabled: bool = False
+    voice_verified: bool = False
+    supabase_audio_bucket: str = Field(default="dreamthread-audio", pattern=r"^[a-z0-9-]{3,63}$")
+    storage_timeout_seconds: int = Field(default=30, ge=5, le=60)
+    audio_max_bytes: int = Field(default=10485760, ge=1024, le=10485760)
+    audio_max_duration_seconds: int = Field(default=180, ge=1, le=180)
+    audio_upload_intent_ttl_seconds: int = Field(default=300, ge=60, le=900)
+    audio_draft_ttl_seconds: int = Field(default=86400, ge=600, le=86400)
+    asr_model: str = Field(default="small", pattern=r"^(tiny|base|small)(\.en)?$")
+    asr_timeout_seconds: int = Field(default=150, ge=10, le=240)
     demo_enabled: bool = False
     model_timeout_seconds: int = Field(default=60, gt=0, le=600)
     nebius_output_mode: Literal["json_object", "json_schema"] = "json_object"
@@ -88,15 +97,6 @@ class Settings(BaseSettings):
         if value and urlsplit(value).path not in {"", "/"}:
             raise ValueError("Supabase URL must be a project origin without an API path")
         return value.rstrip("/") if value else None
-
-    @field_validator("voice_enabled")
-    @classmethod
-    def reject_unavailable_voice(cls, value: bool) -> bool:
-        if value:
-            raise ValueError(
-                "Voice is disabled until private storage and speech processing are verified"
-            )
-        return False
 
     @field_validator("database_url", "queue_database_url")
     @classmethod
@@ -152,6 +152,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def production_requirements(self) -> "Settings":
+        if self.voice_enabled and not (
+            self.voice_verified and self.supabase_url and self.supabase_secret_key
+        ):
+            raise ValueError("Voice requires verified private storage and speech processing")
+        if self.voice_enabled and self.asr_timeout_seconds + 10 >= self.job_timeout_seconds:
+            raise ValueError("ASR timeout must leave publication time within the job timeout")
         if self.job_heartbeat_seconds >= self.job_lease_seconds / 2:
             raise ValueError("Job heartbeat must be shorter than half the lease")
         if self.job_stage_timeout_seconds > self.job_timeout_seconds:

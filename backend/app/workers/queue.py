@@ -12,7 +12,7 @@ from app.db.roles import unsafe_login
 from app.workers.types import WorkFailure
 
 J = tables["app.jobs"]
-MODEL_JOB_KINDS = ("analysis", "embedding", "continuity", "detective_answer")
+MODEL_JOB_KINDS = ("analysis", "embedding", "continuity", "detective_answer", "transcription")
 MODEL_CALL_LOCK = (1146373460, 1)
 
 
@@ -59,11 +59,13 @@ class Queue:
                         [
                             "analysis",
                             "embedding",
+                            "continuity",
                             "detective_answer",
                             "storyline_refresh",
                             "time_capsule_refresh",
                             "export",
                             "journal_delete",
+                            "transcription",
                         ]
                     ),
                     J.c.attempts < s.job_max_attempts,
@@ -225,3 +227,10 @@ class Queue:
 
     async def close(self):
         await self.engine.dispose()
+
+    async def cleanup_candidates(self):
+        cleanup = tables["app.cleanup_tasks"]
+        async with self.engine.connect() as c:
+            return (await c.execute(select(cleanup.c.id, cleanup.c.user_id).where(
+                cleanup.c.state != "complete", cleanup.c.not_before <= func.clock_timestamp()
+            ).order_by(cleanup.c.not_before, cleanup.c.id).limit(25))).mappings().all()

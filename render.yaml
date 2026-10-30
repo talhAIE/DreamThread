@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: dreamthread-api
+    runtime: docker
+    repo: https://github.com/talhAIE/DreamThread
+    branch: feature/phase-9-14-backend
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    region: ohio
+    healthCheckPath: /health/ready
+    dockerCommand: /srv/.venv/bin/python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port 10000 --no-access-log --loop app.loop:create_loop
+    envVars:
+      - fromGroup: dreamthread-runtime
+  - type: worker
+    name: dreamthread-worker
+    runtime: docker
+    repo: https://github.com/talhAIE/DreamThread
+    branch: feature/phase-9-14-backend
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: /srv/.venv/bin/python -m app.workers.main
+    plan: starter
+    region: ohio
+    envVars:
+      - fromGroup: dreamthread-runtime

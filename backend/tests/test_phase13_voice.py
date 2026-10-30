@@ -7,6 +7,7 @@ from app.main import create_app
 
 def settings(**overrides):
     return Settings(
+        _env_file=None,
         database_url="postgresql://user:password@localhost/dreamthread",
         **overrides,
     )
