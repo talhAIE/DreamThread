@@ -23,6 +23,7 @@ from app.services.continuity import (
     canonical_relation_key,
 )
 from app.services.evidence import OutputInvalid, verify_citation
+from app.services.retrieval import MAX_CANDIDATE_POOL, ranked_current_sources
 from app.workers.types import SourceChanged
 
 
@@ -187,6 +188,69 @@ class MockDbCursor:
         return self._rows[0]
 
 
+class BoundedQueryConnection:
+    def __init__(self, rows):
+        self.rows = rows
+        self.statement = None
+
+    async def execute(self, statement):
+        self.statement = statement
+        return MockDbCursor(self.rows)
+
+
+@pytest.mark.anyio
+async def test_continuity_search_bounds_pool_and_reports_truncation():
+    user_id, target_id = uuid4(), uuid4()
+    rows = [
+        {
+            "id": uuid4(),
+            "title": f"House {index}",
+            "dream_date": f"2026-01-{(index % 28) + 1:02d}",
+            "revision_id": uuid4(),
+            "content_hash": "current-hash",
+            "text": "The old house stood by the river.",
+            "lexical_score": 1.0,
+        }
+        for index in range(MAX_CANDIDATE_POOL + 1)
+    ]
+    connection = BoundedQueryConnection(rows)
+
+    candidates, truncated = await ranked_current_sources(
+        connection,
+        user_id,
+        "house",
+        limit=MAX_CANDIDATE_POOL,
+        exclude_dream_id=target_id,
+        matching_only=True,
+        recency_tiebreak=True,
+    )
+
+    statement = str(connection.statement.compile())
+    parameters = connection.statement.compile().params
+    assert len(candidates) == MAX_CANDIDATE_POOL
+    assert truncated
+    assert any(value == user_id for value in parameters.values())
+    assert any(value == target_id for value in parameters.values())
+    assert "app.dream_revisions.id = app.dreams.current_revision_id" in statement
+    assert "app.dream_revisions.user_id = " in statement
+    assert "app.dreams.lifecycle = " in statement
+    assert "to_tsvector" in statement and "plainto_tsquery" in statement
+    assert "ORDER BY" in statement
+    assert "app.dreams.dream_date DESC, app.dreams.id DESC" in statement
+    assert 257 in parameters.values()
+
+
+@pytest.mark.anyio
+async def test_continuity_search_orders_equal_scores_deterministically():
+    connection = BoundedQueryConnection([])
+
+    await ranked_current_sources(connection, uuid4(), "house", limit=3)
+
+    statement = str(connection.statement.compile())
+    assert "ORDER BY" in statement
+    assert statement.endswith("app.dreams.id ASC\n LIMIT :param_5")
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("change_during_call", [False, True])
 async def test_continuity_model_calls_run_without_open_database_transactions(
@@ -244,6 +308,9 @@ async def test_continuity_model_calls_run_without_open_database_transactions(
             return SimpleNamespace(
                 revision_id=revision_id,
                 archive_version=1,
+                candidate_limit=MAX_CANDIDATE_POOL,
+                candidate_search_truncated=False,
+                degraded_reasons=[],
                 candidates=[
                     SimpleNamespace(
                         dream_id=uuid4(),
@@ -479,14 +546,29 @@ async def test_continuity_tools_scope_strictly_to_tenant():
         _env_file=None,
         database_url="postgresql+psycopg://u:p@localhost/test",
     )
-    tools_a = ContinuityTools(mock_conn, user_a, settings)
+    search_conn = BoundedQueryConnection(
+        [
+            {
+                "id": d_a,
+                "title": "House on Hill",
+                "dream_date": "2026-10-01",
+                "revision_id": rev_a,
+                "content_hash": mock_conn.revisions[rev_a]["content_hash"],
+                "text": text_a,
+                "lexical_score": 1.0,
+            }
+        ]
+    )
+    tools_a = ContinuityTools(search_conn, user_a, settings)
 
-    # Searching dreams as User A returns User A's dream
     search_results = await tools_a.search_dreams("house")
-    assert len(search_results) == 1
-    assert search_results[0]["id"] == str(d_a)
+    assert len(search_results["results"]) == 1
+    assert search_results["results"][0]["id"] == str(d_a)
+    assert not search_results["candidate_limit_reached"]
+    assert any(value == user_a for value in search_conn.statement.compile().params.values())
 
     # Attempting to fetch User B's dream ID as User A returns nothing
+    tools_a.connection = mock_conn
     b_dreams = await tools_a.get_dreams([str(d_b)])
     assert len(b_dreams) == 0
 
@@ -659,6 +741,82 @@ async def test_entailment_screening_rejects_unverified_quotes():
     res = await engine._verify_and_persist(mock_conn, user_id, d1, source1, proposals, None)
     # Entailment failure must result in zero saved connections
     assert len(res) == 0
+
+
+@pytest.mark.anyio
+async def test_continuity_rejects_quotes_from_a_stale_candidate_revision():
+    user_id, target_id, candidate_id = uuid4(), uuid4(), uuid4()
+    target_revision, old_revision, current_revision = uuid4(), uuid4(), uuid4()
+    target_text = "A silver key rested beside the open gate."
+    old_text = "I crossed a silver gate at dawn."
+    current_text = "A blue boat drifted beneath the bridge."
+    target_source = {
+        "id": target_revision,
+        "revision_id": target_revision,
+        "content_hash": hashlib.sha256(target_text.encode()).hexdigest(),
+        "text": target_text,
+    }
+    connection = MockConnection(user_id)
+    connection.dreams[target_id] = {
+        "id": target_id,
+        "user_id": user_id,
+        "current_revision_id": target_revision,
+        "lifecycle": "saved",
+        "deleted_at": None,
+    }
+    connection.dreams[candidate_id] = {
+        "id": candidate_id,
+        "user_id": user_id,
+        "current_revision_id": current_revision,
+        "lifecycle": "saved",
+        "deleted_at": None,
+    }
+    connection.revisions[target_revision] = {
+        **target_source,
+        "dream_id": target_id,
+        "user_id": user_id,
+    }
+    connection.revisions[old_revision] = {
+        "id": old_revision,
+        "revision_id": old_revision,
+        "dream_id": candidate_id,
+        "user_id": user_id,
+        "content_hash": hashlib.sha256(old_text.encode()).hexdigest(),
+        "text": old_text,
+    }
+    connection.revisions[current_revision] = {
+        "id": current_revision,
+        "revision_id": current_revision,
+        "dream_id": candidate_id,
+        "user_id": user_id,
+        "content_hash": hashlib.sha256(current_text.encode()).hexdigest(),
+        "text": current_text,
+    }
+
+    engine = ContinuityEngine(
+        None,
+        Settings(
+            _env_file=None,
+            database_url="postgresql+psycopg://user:pass@localhost/test?sslmode=require",
+        ),
+    )
+    proposals = [
+        ComparisonProposal(
+            target_dream_id=target_id,
+            candidate_dream_id=candidate_id,
+            relation_key="motif:gate",
+            similarity_observation="Both dreams mention a silver gate.",
+            quotes_target=["silver key"],
+            quotes_candidate=["silver gate"],
+        )
+    ]
+
+    result = await engine._verify_and_persist(
+        connection, user_id, target_id, target_source, proposals, None
+    )
+
+    assert result == []
+    assert connection.connections == {}
 
 
 def test_connection_read_and_patch_schema_models():

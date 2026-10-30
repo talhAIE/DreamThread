@@ -101,6 +101,7 @@ class Database:
                         "0006_personal_memory",
                         "0007_insights_privacy",
                         "0008_request_rate_limits",
+                        "0009_continuity_search_index",
                     }:
                         # Versioned spaces enforce their own dimensions. The legacy fixed-size
                         # vector column is retained for migration compatibility, never searched.

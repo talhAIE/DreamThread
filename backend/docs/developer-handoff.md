@@ -10,7 +10,7 @@ No credentials are included in this document.
   Phase 13 remains disabled; Phase 14 external cleanup remains gated on private object storage.
 - Neon hosts application data and the durable job queue. No local PostgreSQL is required.
 - Existing Neon provisioning is at `0006_personal_memory`; apply migrations through
-  `0008_request_rate_limits` before running the new API/worker implementation.
+  `0009_continuity_search_index` before running the new API/worker implementation.
 - Live Neon checks passed for restricted runtime/queue roles, TLS, pgvector and tenant context.
 - Supabase project URL and publishable key are configured. Real user sign-in remains unverified.
 - Nebius extraction model: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`.

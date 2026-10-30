@@ -29,7 +29,12 @@ from app.schemas.continuity import (
 from app.services.accounts import active_account
 from app.services.evidence import OutputInvalid, verify_citation
 from app.services.journal import current_source, owned_dream
-from app.services.retrieval import RetrievalService, lexical_rank, snippet
+from app.services.retrieval import (
+    MAX_CANDIDATE_POOL,
+    RetrievalService,
+    ranked_current_sources,
+    snippet,
+)
 from app.workers.types import SourceChanged
 
 PROMPTS = Path(__file__).parents[1] / "prompts"
@@ -49,7 +54,11 @@ CONTINUITY_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_dreams",
-            "description": "Search the authenticated user's dream archive for relevant entries.",
+            "description": (
+                "Search the authenticated user's dream archive. Results may be bounded; "
+                "check candidate_limit_reached and results_truncated before treating them "
+                "as complete."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -196,50 +205,29 @@ class ContinuityTools:
 
     async def search_dreams(
         self, query: str, filters: dict | None = None, limit: int = 3
-    ) -> list[dict]:
+    ) -> dict:
         limit = max(1, min(limit, 5))
-        c = self.connection
-        rows = (
-            await c.execute(
-                select(
-                    D.c.id,
-                    D.c.title,
-                    D.c.dream_date,
-                    R.c.id.label("revision_id"),
-                    R.c.content_hash,
-                    R.c.text,
-                )
-                .join(
-                    R,
-                    and_(
-                        R.c.user_id == D.c.user_id,
-                        R.c.dream_id == D.c.id,
-                        R.c.id == D.c.current_revision_id,
-                    ),
-                )
-                .where(
-                    D.c.user_id == self.user_id,
-                    D.c.lifecycle == "saved",
-                    D.c.deleted_at.is_(None),
-                )
-                .order_by(D.c.dream_date.desc(), D.c.id.desc())
-            )
-        ).mappings().all()
-
-        if not rows:
-            return []
-
-        scores = lexical_rank(query, rows)
-        ranked = sorted(rows, key=lambda r: scores.get(r["id"], 0.0), reverse=True)
-        return [
-            {
-                "id": str(r["id"]),
-                "title": r["title"],
-                "dream_date": str(r["dream_date"]),
-                "snippet": snippet(r["text"], query),
-            }
-            for r in ranked[:limit]
-        ]
+        rows, truncated = await ranked_current_sources(
+            self.connection,
+            self.user_id,
+            query,
+            matching_only=True,
+            recency_tiebreak=True,
+        )
+        return {
+            "results": [
+                {
+                    "id": str(row["id"]),
+                    "title": row["title"],
+                    "dream_date": str(row["dream_date"]),
+                    "snippet": snippet(row["text"], query),
+                }
+                for row in rows[:limit]
+            ],
+            "candidate_limit_reached": truncated,
+            "results_truncated": truncated or len(rows) > limit,
+            "candidate_limit": MAX_CANDIDATE_POOL,
+        }
 
     async def get_dreams(self, ids: list[str]) -> list[dict]:
         clean_ids = []
@@ -379,8 +367,7 @@ class ContinuityTools:
 
     async def execute_tool(self, name: str, args: dict) -> dict:
         if name == "search_dreams":
-            results = await self.search_dreams(args.get("query", ""), limit=args.get("limit", 3))
-            return {"results": results}
+            return await self.search_dreams(args.get("query", ""), limit=args.get("limit", 3))
         elif name == "get_dreams":
             results = await self.get_dreams(args.get("ids", []))
             return {"dreams": results}
@@ -469,6 +456,11 @@ class ContinuityEngine:
                             "text": target_source["text"],
                         },
                         "historical_candidates": candidate_summaries,
+                        "candidate_search": {
+                            "candidate_limit": candidate_res.candidate_limit,
+                            "truncated": candidate_res.candidate_search_truncated,
+                            "degraded_reasons": candidate_res.degraded_reasons,
+                        },
                     },
                     ensure_ascii=False,
                 ),

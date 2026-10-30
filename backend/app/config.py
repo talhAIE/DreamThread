@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     db_connect_timeout_seconds: int = Field(default=15, ge=3, le=60)
     db_pool_recycle_seconds: int = Field(default=300, ge=30, le=3600)
     queue_pool_size: int = Field(default=1, ge=1, le=5)
-    expected_schema_revision: str = "0008_request_rate_limits"
+    expected_schema_revision: str = "0009_continuity_search_index"
     supabase_url: str | None = None
     supabase_publishable_key: SecretStr | None = None
     supabase_secret_key: SecretStr | None = None

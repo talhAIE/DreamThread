@@ -38,6 +38,8 @@ class CandidateResult(Contract):
     memory_version: int
     degraded: bool
     degraded_reasons: list[str]
+    candidate_search_truncated: bool
+    candidate_limit: int
     active_embedding_version: str | None
     target_embedding_version: str
     indexed_dreams: int

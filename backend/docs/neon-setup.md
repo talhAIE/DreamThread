@@ -57,7 +57,7 @@ Recommended application settings (already in .env.example):
 
 ```dotenv
 APP_ENV=development
-EXPECTED_SCHEMA_REVISION=0008_request_rate_limits
+EXPECTED_SCHEMA_REVISION=0009_continuity_search_index
 PROMPT_VERSION=v2
 EMBEDDING_VERSION=v1
 CORS_ORIGINS=["http://localhost:3000"]

@@ -142,9 +142,15 @@ def dream(connection, user, title="A house"):
 def test_schema_security_catalog_and_existing_upgrade(cluster):
     with cluster["admin"].connect() as c:
         revision = c.scalar(text("SELECT version_num FROM app.alembic_version"))
-        assert revision == "0008_request_rate_limits"
+        assert revision == "0009_continuity_search_index"
         assert c.scalar(text("SELECT count(*) FROM app.accounts")) == 2
         assert c.scalar(text("SELECT count(*) FROM pg_tables WHERE schemaname='app'")) == 38
+        assert c.scalar(text("""
+            SELECT EXISTS(
+                SELECT 1 FROM pg_indexes
+                WHERE schemaname='app' AND indexname='ix_dream_revisions_text_search'
+            )
+        """))
         assert c.scalar(text(
             "SELECT relforcerowsecurity FROM pg_class WHERE oid='app.api_rate_limits'::regclass"
         ))
@@ -455,7 +461,7 @@ def test_phase12_insights_capsule_and_phase14_export_deletion_are_tenant_scoped(
 
     settings = Settings(
         database_url=cluster["urls"]["app"],
-        expected_schema_revision="0008_request_rate_limits",
+        expected_schema_revision="0009_continuity_search_index",
         embedding_dimensions=3,
     )
     db = Database(settings)
@@ -630,7 +636,7 @@ def test_postgres_enforces_shared_model_concurrency_and_atomic_user_rate_limit(c
     settings = Settings(
         database_url=cluster["urls"]["app"],
         queue_database_url=cluster["urls"]["queue"],
-        expected_schema_revision="0008_request_rate_limits",
+        expected_schema_revision="0009_continuity_search_index",
         embedding_dimensions=3,
         worker_concurrency=1,
     )
