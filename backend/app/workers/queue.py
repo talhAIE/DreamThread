@@ -12,6 +12,8 @@ from app.db.roles import unsafe_login
 from app.workers.types import WorkFailure
 
 J = tables["app.jobs"]
+MODEL_JOB_KINDS = ("analysis", "embedding", "continuity", "detective_answer", "transcription")
+MODEL_CALL_LOCK = (1146373460, 1)
 
 
 class Queue:
@@ -49,10 +51,23 @@ class Queue:
     async def claim(self):
         s, now = self.settings, func.clock_timestamp()
         async with self.engine.begin() as c:
-            candidate = await c.scalar(
-                select(J.c.id)
+            candidate = (
+                await c.execute(
+                    select(J.c.id, J.c.kind)
                 .where(
-                    J.c.kind.in_(["analysis", "embedding"]),
+                    J.c.kind.in_(
+                        [
+                            "analysis",
+                            "embedding",
+                            "continuity",
+                            "detective_answer",
+                            "storyline_refresh",
+                            "time_capsule_refresh",
+                            "export",
+                            "journal_delete",
+                            "transcription",
+                        ]
+                    ),
                     J.c.attempts < s.job_max_attempts,
                     or_(
                         and_(J.c.status == "queued", J.c.run_after <= now),
@@ -70,14 +85,29 @@ class Queue:
                 .order_by(J.c.run_after, J.c.created_at, J.c.id)
                 .with_for_update(skip_locked=True)
                 .limit(1)
-            )
+                )
+            ).mappings().one_or_none()
             if candidate is None:
                 return None
+            if candidate["kind"] in MODEL_JOB_KINDS:
+                await c.execute(select(func.pg_advisory_xact_lock(*MODEL_CALL_LOCK)))
+                active_model_calls = await c.scalar(
+                    select(func.count())
+                    .select_from(J)
+                    .where(
+                        J.c.kind.in_(MODEL_JOB_KINDS),
+                        J.c.status == "running",
+                        J.c.leased_until > now,
+                        J.c.deadline_at > now,
+                    )
+                )
+                if active_model_calls >= self.settings.worker_concurrency:
+                    return None
             return (
                 (
                     await c.execute(
                         update(J)
-                        .where(J.c.id == candidate)
+                        .where(J.c.id == candidate["id"])
                         .values(
                             status="running",
                             attempts=J.c.attempts + 1,
@@ -145,7 +175,18 @@ class Queue:
             return (
                 (
                     await c.execute(
-                        select(J.c.id, J.c.user_id, J.c.payload)
+                        select(
+                            J.c.id,
+                            J.c.user_id,
+                            J.c.kind,
+                            J.c.payload,
+                            J.c.status,
+                            J.c.stage,
+                            J.c.attempts,
+                            J.c.leased_until,
+                            J.c.deadline_at,
+                            J.c.updated_at,
+                        )
                         .where(
                             or_(
                                 and_(
@@ -168,6 +209,12 @@ class Queue:
                                     J.c.updated_at
                                     < now - timedelta(days=self.settings.checkpoint_retention_days),
                                 ),
+                                and_(
+                                    J.c.kind == "export",
+                                    J.c.status == "succeeded",
+                                    J.c.stage != "retention_cleaned",
+                                    J.c.updated_at < now - timedelta(minutes=15),
+                                ),
                             )
                         )
                         .order_by(J.c.updated_at)
@@ -180,3 +227,10 @@ class Queue:
 
     async def close(self):
         await self.engine.dispose()
+
+    async def cleanup_candidates(self):
+        cleanup = tables["app.cleanup_tasks"]
+        async with self.engine.connect() as c:
+            return (await c.execute(select(cleanup.c.id, cleanup.c.user_id).where(
+                cleanup.c.state != "complete", cleanup.c.not_before <= func.clock_timestamp()
+            ).order_by(cleanup.c.not_before, cleanup.c.id).limit(25))).mappings().all()

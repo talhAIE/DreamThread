@@ -27,7 +27,11 @@ class AccountService:
             await c.execute(insert(ACCOUNTS).values(
                 id=identity.user_id, is_anonymous=identity.is_anonymous,
             ).on_conflict_do_nothing(index_elements=[ACCOUNTS.c.id]))
-            account = await active_account(c, identity.user_id)
+            account = (await c.execute(
+                select(ACCOUNTS).where(ACCOUNTS.c.id == identity.user_id).with_for_update()
+            )).mappings().one()
+            if account["deletion_state"] != "active":
+                return
             if account["is_anonymous"] != identity.is_anonymous:
                 await c.execute(update(ACCOUNTS).where(ACCOUNTS.c.id == identity.user_id).values(
                     is_anonymous=identity.is_anonymous, version=ACCOUNTS.c.version + 1,

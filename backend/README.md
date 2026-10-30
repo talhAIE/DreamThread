@@ -109,7 +109,10 @@ and source invalidation still belong to later phases.
 - 0004_worker_checkpoints: lease/stage deadlines and private checkpoint artifacts.
 - 0005_embedding_spaces: tenant-private vector spaces and source-aligned embedding chunks.
 - 0006_personal_memory: association provenance/forgetting markers and follow-up answer versions.
-  Set EXPECTED_SCHEMA_REVISION=0006_personal_memory in existing .env files before starting.
+- 0007_insights_privacy: short-lived export payloads protected by the existing tenant RLS policy.
+- 0008_request_rate_limits: atomic per-user API request windows under forced RLS.
+- 0009_continuity_search_index: indexed current-source search for bounded continuity retrieval.
+  Set EXPECTED_SCHEMA_REVISION=0009_continuity_search_index in existing .env files before starting.
 - app.alembic_version is readable by runtime for readiness; application DDL belongs to owner.
 - schema_v1.py/security_v1.py are frozen snapshots. Future changes use new migrations;
   never edit released snapshots. Runtime tables currently re-export baseline metadata.
@@ -271,7 +274,7 @@ metadata only. This live check has **not** been run; the user deferred it until 
 See [capability status](docs/model-capabilities.md). Then run the API/worker and save a dream,
 poll its job, and retrieve /api/v1/dreams/{id}/analysis for the complete database-backed flow.
 Phase 6 changes the pipeline fingerprint; analyze the current dream again if an older job is stale.
-Phase 6 required no migration. The current migration head is 0006_personal_memory.
+Phase 6 required no migration.
 
 ## Embeddings and retrieval
 
@@ -351,7 +354,7 @@ pipeline regression check, not a claim about real model retrieval quality.
 
 ## Personal memory, identities and corrections
 
-Run `uv run alembic upgrade head`, set EXPECTED_SCHEMA_REVISION=0006_personal_memory and
+Run `uv run alembic upgrade head`, set EXPECTED_SCHEMA_REVISION=0009_continuity_search_index and
 PROMPT_VERSION=v2 in existing .env files, then restart API/worker. The new pipeline fingerprint
 withholds older cached analyses until reanalysis. v1 prompt files remain unchanged for history;
 v2 adds confirmed personal context and explicit user-correction provenance.

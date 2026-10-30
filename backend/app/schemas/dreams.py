@@ -20,6 +20,8 @@ def postgres_text(value):
 
 
 class DreamCreate(Contract):
+    input_mode: Literal["text", "voice"] = "text"
+    audio_asset_id: UUID | None = None
     title: str = Field(default="Untitled dream", min_length=1, max_length=160)
     dream_date: date
     text: str = Field(default="", max_length=20000)
@@ -40,6 +42,10 @@ class DreamCreate(Contract):
 
     @model_validator(mode="after")
     def saved_content(self):
+        if (self.input_mode == "voice") != (self.audio_asset_id is not None):
+            raise ValueError("Voice entries require an audio asset; text entries cannot attach one")
+        if self.input_mode == "voice" and self.lifecycle != "saved":
+            raise ValueError("Review the transcript before saving a voice entry")
         if self.lifecycle == "saved" and not self.text.strip():
             raise ValueError("Saved dreams need text")
         return self

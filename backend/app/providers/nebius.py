@@ -14,42 +14,59 @@ from app.workers.types import WorkFailure, retry_after
 class Completion:
     text: str
     run_id: object
+    tool_calls: list = ()
 
 
 class Nebius:
     def __init__(self, settings, *, transport=None):
         self.settings, self.transport = settings, transport
 
-    def configured(self):
+    def configured(self, model=None):
         settings = self.settings
-        if not settings.nebius_api_key or not settings.nebius_extraction_model:
+        chosen = model or settings.nebius_extraction_model
+        if not settings.nebius_api_key or not chosen:
             raise WorkFailure("provider_not_configured")
-        model = settings.nebius_extraction_model.casefold()
-        if not model.startswith("nvidia/") or "nemotron" not in model:
+        model_name = chosen.casefold()
+        if not model_name.startswith("nvidia/") or "nemotron" not in model_name:
             raise WorkFailure("provider_configuration")
 
-    async def complete(self, messages, schema, *, task, record):
-        self.configured()
-        settings, model = self.settings, self.settings.nebius_extraction_model
+    async def complete(self, messages, schema=None, *, task, record, model=None, tools=None):
+        settings = self.settings
+        chosen_model = (
+            model
+            or (settings.nebius_reasoning_model if task in {"continuity", "detective"} else None)
+            or settings.nebius_extraction_model
+        )
+        self.configured(model=chosen_model)
+        output_limit = (
+            settings.agent_max_output_tokens
+            if task in {"continuity", "detective"}
+            else settings.model_max_output_tokens
+        )
         # Deliberately conservative upper bound (one token per UTF-8 byte plus protocol headroom).
+        schema_bytes = len(json.dumps(schema).encode()) if schema else 0
+        tools_bytes = len(json.dumps(tools).encode()) if tools else 0
         estimated = (
             len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
-            + len(json.dumps(schema).encode())
-            + settings.model_max_output_tokens
+            + schema_bytes
+            + tools_bytes
+            + output_limit
             + 512
         )
         if estimated > settings.model_context_token_budget:
             raise WorkFailure("provider_input_too_large")
-        response_format = {"type": "json_object"}
-        if settings.nebius_output_mode == "json_schema":
-            response_format = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": task,
-                    "strict": True,
-                    "schema": schema,
-                },
-            }
+        response_format = None
+        if schema:
+            response_format = {"type": "json_object"}
+            if settings.nebius_output_mode == "json_schema":
+                response_format = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": task,
+                        "strict": True,
+                        "schema": schema,
+                    },
+                }
         started, usage, failure, completion = time.perf_counter(), None, None, None
         async with AsyncOpenAI(
             api_key=settings.nebius_api_key.get_secret_value(),
@@ -61,21 +78,20 @@ class Nebius:
             ),
         ) as client:
             try:
-                completion = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    response_format=response_format,
-                    max_tokens=settings.model_max_output_tokens,
-                    temperature=0,
-                    # Nano 3 reasons by default and can exhaust the entire bounded
-                    # output budget before producing JSON. These structured stages
-                    # use its documented direct-answer mode; older models retain
-                    # their existing request contract.
-                    extra_body={"chat_template_kwargs": {"enable_thinking": False}}
-                    if "nemotron-3-nano" in model.casefold()
+                request_kwargs = {
+                    "model": chosen_model,
+                    "messages": messages,
+                    "max_tokens": output_limit,
+                    "temperature": 0,
+                    "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}
+                    if "nemotron-3-nano" in chosen_model.casefold()
                     else None,
-                    # No tools are provided, so dream text cannot invoke tools or change identity.
-                )
+                }
+                if response_format:
+                    request_kwargs["response_format"] = response_format
+                if tools:
+                    request_kwargs["tools"] = tools
+                completion = await client.chat.completions.create(**request_kwargs)
                 usage = completion.usage
             except (APITimeoutError, APIConnectionError):
                 failure = WorkFailure("provider_timeout", retryable=True)
@@ -96,7 +112,7 @@ class Nebius:
                 failure = WorkFailure("invalid_output")
         run_id = await record(
             provider="nebius",
-            model_id=model,
+            model_id=chosen_model,
             task=task,
             latency_ms=(time.perf_counter() - started) * 1000,
             input_tokens=usage_count(usage, "prompt_tokens"),
@@ -105,16 +121,20 @@ class Nebius:
         )
         if failure:
             raise failure
+        allowed_finish = {"stop", "tool_calls"} if tools else {"stop"}
         if (
             not completion.choices
-            or completion.choices[0].finish_reason != "stop"
-            or completion.choices[0].message.tool_calls
+            or completion.choices[0].finish_reason not in allowed_finish
+            or (not tools and completion.choices[0].message.tool_calls)
             or completion.choices[0].message.refusal
         ):
             return Completion("", run_id)
         content = completion.choices[0].message.content
+        tool_calls = list(completion.choices[0].message.tool_calls or [])
         return Completion(
-            content if isinstance(content, str) and len(content) <= 131072 else "", run_id
+            content if isinstance(content, str) and len(content) <= 131072 else "",
+            run_id,
+            tool_calls=tool_calls,
         )
 
 

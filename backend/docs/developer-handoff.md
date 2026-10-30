@@ -6,9 +6,11 @@ No credentials are included in this document.
 
 ## What is ready
 
-- Phases 1-8 are implemented. Active .env entries cover every current Settings field.
+- Phases 1-12 and the database-backed Phase 14 export/deletion paths are implemented locally.
+  Phase 13 remains disabled; Phase 14 external cleanup remains gated on private object storage.
 - Neon hosts application data and the durable job queue. No local PostgreSQL is required.
-- Neon provisioning and migrations completed; current schema is `0006_personal_memory`.
+- Existing Neon provisioning is at `0006_personal_memory`; apply migrations through
+  `0009_continuity_search_index` before running the new API/worker implementation.
 - Live Neon checks passed for restricted runtime/queue roles, TLS, pgvector and tenant context.
 - Supabase project URL and publishable key are configured. Real user sign-in remains unverified.
 - Nebius extraction model: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`.
@@ -80,27 +82,27 @@ developer must add typed settings, validation, consumers, Compose mappings and t
 | 9 continuity | Reuse NEBIUS_REASONING_MODEL initially. Proposed caps: 4 rounds, 8 tools, 12 candidates, 90-second deadline and 2048 output tokens. Probe tool calling/structured outputs before release. |
 | 10 constellation | Proposed graph limits: 100 nodes / 200 edges. No new external credential. |
 | 11 Detective | Same reasoning model and bounded tools; implement conversation/context limits and validate evidence. No separate API key required. |
-| 12 insights | Existing Neon/Nebius credentials; on-demand generation initially. No scheduler credential required. |
-| 13 voice | Needs actual private storage buckets, storage admin access and a transcription worker. Keep VOICE_ENABLED=false until implemented and verified. |
-| 14 export/privacy | Needs private export storage if object-backed exports are chosen, expiry/cleanup enforcement and deletion tests. Supabase admin access is needed only if implementing admin account removal or privileged storage operations. |
+| 12 insights | SQL-backed, tenant-scoped summaries and deterministic time capsules are implemented; no scheduler or model credentials are needed. |
+| 13 voice | No private bucket/provider endpoint, storage identity, media decoder, or verified faster-whisper worker is configured. Keep VOICE_ENABLED=false; configuration rejects attempts to enable it. Provision and verify the full private upload/transcription/deletion path before enabling. |
+| 14 export/privacy | Exports are tenant-protected in PostgreSQL with an authenticated download route and 15-minute expiry. Journal deletion is durable and epoch-fenced for database records. Per-user requests are limited to 120/minute by default; model calls are globally capped via queue database advisory locking. External object keys can be recorded as pending cleanup tasks, but there is no adapter/worker or supported manual process to delete them. If any cleanup remains pending, the deletion job fails visibly and the account stays blocked in `deleting`; provision and verify the cleanup path before retrying. Nebius and Neon backup retention/erasure terms are operational release dependencies and have not been verified. |
 | 15 acceptance | Separate synthetic test users/isolated fixtures and end-to-end validation. User access tokens are temporary runtime credentials, not static .env values. |
 | 16 deployment | Select a deployment host and actual HTTPS frontend origin. Configure production secrets, HTTPS CORS, migration release step, resource limits, monitoring and restart policies. |
 
-### Voice and export setup still needed
+### Voice and external cleanup still needed
 
 `SUPABASE_SECRET_KEY` is explicitly empty; current authentication needs only the publishable key.
-If Supabase Storage is selected, obtain the real server secret key privately from that project.
-Create private buckets named `dreamthread-audio` and `dreamthread-exports`, or update the proposed
-bucket names to match the actual provisioned resources. No storage buckets were created by this setup.
-Implement server-generated owner-scoped keys, short-lived signed access and cleanup before use.
-Privileged credentials must stay on the backend.
+No object-storage provider, bucket, endpoint, credential, or server adapter is configured; the
+commented future storage settings are not consumed by the application. Voice and audio retention
+remain disabled. See `privacy-data-flow.md` for the required provider configuration, media/ASR
+acceptance gate, durable object-deletion tests, and unverified provider/backup-retention
+dependencies. Exports do not use object storage: content stays in an RLS-protected database column
+and is removed after 15 minutes.
 
 Baseline ASR is faster-whisper with `small`, CPU, int8 as a starting configuration; this has not
-been installed or performance-tested. Validate model availability/license, FFmpeg, worker capacity
-and deployment requirements before enabling it. CPU limits and transcription deadlines need testing.
-Proposed upload limits are 10 MiB and 180 seconds, signed access 300 seconds, upload intent
-900 seconds, abandoned-object cleanup 24 hours and export expiry one hour. Enforce actual media
-limits and deletion deadlines in code; comments are not enforcement.
+been installed or performance-tested. Validate model availability/license, FFmpeg, worker capacity,
+deployment capacity, processing deadlines, private bucket access, signed upload completion, and
+delete-during-transcription before enabling voice. The documented media limits are 10 MiB and
+180 seconds; actual upload/decode handling is not implemented.
 
 ### Production setup still needed
 

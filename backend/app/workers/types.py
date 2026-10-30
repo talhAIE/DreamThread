@@ -39,6 +39,13 @@ class WorkFailure(Exception):
             "provider_input_too_large",
             "embedding_dimension_mismatch",
             "embedding_version_conflict",
+            "storage_key_invalid",
+            "storage_configuration",
+            "storage_unavailable",
+            "invalid_audio",
+            "speech_timeout",
+            "speech_unavailable",
+            "source_changed",
         }
         self.code = code if code in allowed else "internal_error"
         self.retryable, self.retry_after = retryable, retry_after

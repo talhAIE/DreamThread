@@ -6,18 +6,24 @@ from app.errors import error_response
 
 
 class BodyLimitMiddleware:
-    def __init__(self, app, max_bytes):
+    def __init__(self, app, max_bytes, audio_prefix=None, audio_max_bytes=10485760):
         self.app, self.max_bytes = app, max_bytes
+        self.audio_prefix, self.audio_max_bytes = audio_prefix, audio_max_bytes
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         headers = Headers(scope=scope)
+        maximum = self.max_bytes
+        if (self.audio_prefix and scope.get("method") == "PUT"
+                and scope.get("path", "").startswith(self.audio_prefix)
+                and scope.get("path", "").endswith("/upload")):
+            maximum = self.audio_max_bytes
         length = headers.get("content-length")
         invalid = False
         try:
-            invalid = length is not None and (int(length) < 0 or int(length) > self.max_bytes)
+            invalid = length is not None and (int(length) < 0 or int(length) > maximum)
         except ValueError:
             invalid = True
         # Reject compressed bodies to prevent decompression-size bypasses downstream.
@@ -30,7 +36,7 @@ class BodyLimitMiddleware:
                     return
                 chunk = message.get("body", b"")
                 size += len(chunk)
-                if size > self.max_bytes:
+                if size > maximum:
                     invalid = True
                     break
                 chunks.append(chunk)

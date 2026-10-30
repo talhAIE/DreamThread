@@ -1,14 +1,21 @@
 FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
 FROM python:3.12.7-slim-bookworm
+ARG INSTALL_VOICE=false
 COPY --from=uv /uv /usr/local/bin/uv
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1
 WORKDIR /srv
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN if [ "$INSTALL_VOICE" = "true" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends libgomp1 libstdc++6 \
+      && rm -rf /var/lib/apt/lists/* \
+      && uv sync --frozen --no-dev --no-install-project --extra voice; \
+    else uv sync --frozen --no-dev --no-install-project; fi
 COPY app ./app
 COPY migrations ./migrations
 COPY alembic.ini ./
-RUN uv sync --frozen --no-dev && useradd --uid 10001 --create-home appuser
+RUN if [ "$INSTALL_VOICE" = "true" ]; then uv sync --frozen --no-dev --extra voice; \
+    else uv sync --frozen --no-dev; fi \
+    && useradd --uid 10001 --create-home appuser
 USER appuser
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

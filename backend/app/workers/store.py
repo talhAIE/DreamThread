@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.auth.identity import Identity
@@ -456,6 +456,24 @@ class Store:
             dream = self.guard(account, dreams, current, execution.sources)
             await self.check_hashes(c, execution.sources)
             await IndexService(self.db, self.settings).publish(c, execution, publication, dream)
+            # Continuity follows indexing and owns a separate fenced job. It must never
+            # overwrite the validated single-dream analysis with an empty publication.
+            preferences = tables["app.preferences"]
+            auto = await c.scalar(select(preferences.c.auto_connections).where(
+                preferences.c.user_id == execution.job["user_id"]
+            ))
+            if auto:
+                await c.execute(insert(J).values(
+                    user_id=execution.job["user_id"], kind="continuity",
+                    dedupe_key=f"{dream['current_revision_id']}:{account['archive_version']}:"
+                               f"{account['memory_version']}:{pipeline_version(self.settings)}",
+                    payload={"dream_id": str(dream["id"]),
+                             "revision_id": str(dream["current_revision_id"])},
+                    data_epoch=account["data_epoch"], input_versions={
+                        "archive_version": account["archive_version"],
+                        "memory_version": account["memory_version"],
+                    },
+                ).on_conflict_do_nothing(index_elements=[J.c.user_id, J.c.kind, J.c.dedupe_key]))
             await c.execute(
                 update(J)
                 .where(J.c.id == current["id"])
@@ -542,9 +560,29 @@ class Store:
                     primary = self.guard(account, dreams, current)
                 except SourceChanged:
                     primary = None
-                await c.execute(
+                predicates = [
+                    J.c.id == current["id"],
+                    J.c.user_id == current["user_id"],
+                    J.c.attempts == current["attempts"],
+                    J.c.attempts >= self.settings.job_max_attempts,
+                ]
+                if current["status"] == "running":
+                    predicates.extend(
+                        (
+                            J.c.status == "running",
+                            or_(
+                                J.c.leased_until.is_(None),
+                                J.c.leased_until <= func.clock_timestamp(),
+                                J.c.deadline_at.is_(None),
+                                J.c.deadline_at <= func.clock_timestamp(),
+                            ),
+                        )
+                    )
+                else:
+                    predicates.append(J.c.status == "queued")
+                result = await c.execute(
                     update(J)
-                    .where(J.c.id == current["id"])
+                    .where(*predicates)
                     .values(
                         status="failed" if primary else "cancelled",
                         stage="failed" if primary else "superseded",
@@ -555,7 +593,7 @@ class Store:
                         stage_deadline_at=None,
                     )
                 )
-                if primary and current["kind"] == "analysis":
+                if result.rowcount == 1 and primary and current["kind"] == "analysis":
                     await c.execute(
                         update(D).where(D.c.id == primary["id"]).values(analysis_state="failed")
                     )
@@ -564,14 +602,38 @@ class Store:
                 current["status"] in {"succeeded", "failed", "cancelled"}
                 and current["updated_at"] < cutoff
             ):
-                await c.execute(delete(ART).where(ART.c.job_id == current["id"]))
-                await c.execute(
-                    update(J).where(J.c.id == current["id"]).values(stage="retention_cleaned")
+                cleaned = await c.execute(
+                    update(J)
+                    .where(
+                        J.c.id == current["id"],
+                        J.c.user_id == current["user_id"],
+                        J.c.status.in_(("succeeded", "failed", "cancelled")),
+                        J.c.stage != "retention_cleaned",
+                        J.c.updated_at < cutoff,
+                    )
+                    .values(stage="retention_cleaned")
                 )
+                if cleaned.rowcount == 1:
+                    await c.execute(
+                        delete(ART).where(
+                            ART.c.user_id == current["user_id"],
+                            ART.c.job_id == current["id"],
+                        )
+                    )
             keys = tables["app.idempotency_keys"]
-            await c.execute(delete(keys).where(keys.c.expires_at < now))
+            await c.execute(
+                delete(keys).where(
+                    keys.c.user_id == current["user_id"],
+                    keys.c.expires_at < now,
+                )
+            )
             usage = tables["app.ai_usage"]
-            await c.execute(delete(usage).where(usage.c.period < cutoff.date()))
+            await c.execute(
+                delete(usage).where(
+                    usage.c.user_id == current["user_id"],
+                    usage.c.period < cutoff.date(),
+                )
+            )
 
 
 class Execution:

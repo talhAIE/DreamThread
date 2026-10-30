@@ -4,7 +4,7 @@ import math
 import re
 from collections import Counter
 
-from sqlalchemy import and_, func, select, true
+from sqlalchemy import Float, and_, case, cast, func, literal_column, or_, select, true
 
 from app.db.models import tables
 from app.providers.embeddings import configuration, fingerprint
@@ -31,6 +31,11 @@ STOP = set(
     "that the their them then there they this to was we were with you your dream dreamed "
     "saw went felt very some something through into".split()
 )
+MAX_CANDIDATE_POOL = 256
+MAX_SEARCH_TERMS = 64
+MAX_MOTIF_CANDIDATE_ROWS = 4096
+MAX_ASSOCIATION_CANDIDATE_ROWS = 2048
+SEARCH_CONFIG = literal_column("'simple'::regconfig")
 
 
 def terms(value):
@@ -59,6 +64,96 @@ def snippet(text, query):
     return text[start : start + 240]
 
 
+def _current_source_from():
+    return D.join(
+        R,
+        and_(
+            R.c.user_id == D.c.user_id,
+            R.c.dream_id == D.c.id,
+            R.c.id == D.c.current_revision_id,
+        ),
+    )
+
+
+def _search_vector():
+    return func.to_tsvector(SEARCH_CONFIG, R.c.text)
+
+
+async def ranked_current_sources(
+    connection,
+    user_id,
+    query,
+    *,
+    limit=MAX_CANDIDATE_POOL,
+    exclude_dream_id=None,
+    matching_only=False,
+    recency_tiebreak=False,
+):
+    """Return a bounded, tenant-scoped pool ranked by archive-wide lexical IDF."""
+    all_query_terms = sorted(terms(query))
+    query_terms = all_query_terms[:MAX_SEARCH_TERMS]
+    query_terms_limited = len(all_query_terms) > MAX_SEARCH_TERMS
+    source_from = _current_source_from()
+    filters = [
+        D.c.user_id == user_id,
+        R.c.user_id == user_id,
+        D.c.lifecycle == "saved",
+        D.c.deleted_at.is_(None),
+    ]
+    if exclude_dream_id is not None:
+        filters.append(D.c.id != exclude_dream_id)
+
+    vector = _search_vector()
+    term_matches = [
+        vector.op("@@")(
+            func.plainto_tsquery(SEARCH_CONFIG, term)
+        )
+        for term in query_terms
+    ]
+    score = 0.0
+    if term_matches:
+        corpus_size = (
+            select(func.count(D.c.id))
+            .select_from(source_from)
+            .where(*filters)
+            .scalar_subquery()
+        )
+        for term, matched in zip(query_terms, term_matches, strict=True):
+            term_query = func.plainto_tsquery(SEARCH_CONFIG, term)
+            document_frequency = (
+                select(func.count(D.c.id))
+                .select_from(source_from)
+                .where(*filters, vector.op("@@")(term_query))
+                .scalar_subquery()
+            )
+            weight = 1 + func.ln(
+                cast(corpus_size + 1, Float) / cast(document_frequency + 1, Float)
+            )
+            score = score + case((matched, weight), else_=0.0)
+
+    statement = select(
+        D.c.id,
+        D.c.title,
+        D.c.dream_date,
+        R.c.id.label("revision_id"),
+        R.c.content_hash,
+        R.c.text,
+        score.label("lexical_score"),
+    ).select_from(source_from).where(*filters)
+    if matching_only and term_matches:
+        statement = statement.where(or_(*term_matches))
+    elif matching_only:
+        return [], query_terms_limited
+
+    if recency_tiebreak:
+        statement = statement.order_by(score.desc(), D.c.dream_date.desc(), D.c.id.desc())
+    else:
+        statement = statement.order_by(score.desc(), D.c.id.asc())
+    statement = statement.limit(limit + 1)
+    rows = (await connection.execute(statement)).mappings().all()
+    return rows[:limit], len(rows) > limit or query_terms_limited
+
+
 class RetrievalService:
     def __init__(self, db, settings):
         self.db, self.settings = db, settings
@@ -70,111 +165,22 @@ class RetrievalService:
             account = await active_account(c, user)
             dream = await owned_dream(c, user, dream_id)
             source = await current_source(c, dream)
-            rows = (
-                (
-                    await c.execute(
-                        select(
-                            D.c.id,
-                            D.c.title,
-                            D.c.dream_date,
-                            R.c.id.label("revision_id"),
-                            R.c.content_hash,
-                            R.c.text,
-                        )
-                        .join(
-                            R,
-                            and_(
-                                R.c.user_id == D.c.user_id,
-                                R.c.dream_id == D.c.id,
-                                R.c.id == D.c.current_revision_id,
-                            ),
-                        )
-                        .where(
-                            D.c.user_id == user, D.c.lifecycle == "saved", D.c.deleted_at.is_(None)
-                        )
-                        .order_by(D.c.id)
-                    )
+            total_saved = await c.scalar(
+                select(func.count(D.c.id)).where(
+                    D.c.user_id == user,
+                    D.c.lifecycle == "saved",
+                    D.c.deleted_at.is_(None),
                 )
-                .mappings()
-                .all()
             )
-            others = [row for row in rows if row["id"] != dream_id]
-            lexical = lexical_rank(source["text"], others)
-            scores = dict(lexical)
-            reasons = {row["id"]: (["text_match"] if lexical[row["id"]] else []) for row in others}
-            association_ids = {row["id"]: [] for row in others}
-            # Current, non-rejected motif links only; no label-based identity merges are written.
-            motifs = (
-                (
-                    await c.execute(
-                        select(
-                            DM.c.dream_id,
-                            DM.c.motif_id,
-                            DM.c.confirmation_state,
-                            M.c.canonical_label,
-                        )
-                        .join(
-                            M,
-                            and_(
-                                M.c.user_id == DM.c.user_id,
-                                M.c.id == DM.c.motif_id,
-                            ),
-                        )
-                        .join(
-                            D,
-                            and_(
-                                D.c.user_id == DM.c.user_id,
-                                D.c.id == DM.c.dream_id,
-                                D.c.current_revision_id == DM.c.revision_id,
-                            ),
-                        )
-                        .where(
-                            DM.c.user_id == user,
-                            DM.c.confirmation_state != "rejected",
-                            D.c.lifecycle == "saved",
-                            D.c.deleted_at.is_(None),
-                        )
-                    )
-                )
-                .mappings()
-                .all()
+            archive_limited = max(0, (total_saved or 0) - 1) > MAX_CANDIDATE_POOL
+            rows, lexical_limited = await ranked_current_sources(
+                c,
+                user,
+                source["text"],
+                exclude_dream_id=dream_id,
+                matching_only=archive_limited,
             )
-            primary_motifs = {row["motif_id"] for row in motifs if row["dream_id"] == dream_id}
-            associations = (
-                (
-                    await c.execute(
-                        select(A).where(
-                            A.c.user_id == user,
-                            A.c.status == "confirmed",
-                            A.c.enabled.is_(True),
-                            A.c.deleted_at.is_(None),
-                        )
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            matched_associations = {}
-            for item in associations:
-                if item["motif_id"] in primary_motifs or terms(item["meaning"]) & terms(
-                    source["text"]
-                ):
-                    matched_associations.setdefault(item["motif_id"], []).append(item["id"])
-            for row in motifs:
-                key = row["dream_id"]
-                if key not in scores:
-                    continue
-                if row["motif_id"] in primary_motifs or (
-                    row["canonical_label"].casefold() in source["text"].casefold()
-                ):
-                    confirmed = row["confirmation_state"] == "confirmed"
-                    scores[key] += 6 if confirmed else 2
-                    reasons[key].append("confirmed_motif" if confirmed else "motif_mention")
-                ids = matched_associations.get(row["motif_id"], [])
-                if ids:
-                    scores[key] += 8
-                    reasons[key].append("confirmed_association")
-                    association_ids[key].extend(ids)
+            rows = list(rows)
             space = (
                 (await c.execute(select(S).where(S.c.user_id == user, S.c.state == "active")))
                 .mappings()
@@ -244,20 +250,145 @@ class RetrievalService:
                     degraded.append("query_embedding_missing")
             else:
                 degraded.append("embedding_space_unavailable")
-            if indexed < len(rows):
+            semantic_ids = [row["dream_id"] for row in semantic]
+            row_ids = {row["id"] for row in rows}
+            missing_semantic_ids = [item for item in semantic_ids if item not in row_ids]
+            if missing_semantic_ids:
+                semantic_rows = (
+                    await c.execute(
+                        select(
+                            D.c.id,
+                            D.c.title,
+                            D.c.dream_date,
+                            R.c.id.label("revision_id"),
+                            R.c.content_hash,
+                            R.c.text,
+                            literal_column("0.0").label("lexical_score"),
+                        )
+                        .join(
+                            R,
+                            and_(
+                                R.c.user_id == D.c.user_id,
+                                R.c.dream_id == D.c.id,
+                                R.c.id == D.c.current_revision_id,
+                            ),
+                        )
+                        .where(
+                            D.c.user_id == user,
+                            D.c.id.in_(missing_semantic_ids),
+                            D.c.lifecycle == "saved",
+                            D.c.deleted_at.is_(None),
+                        )
+                        .order_by(D.c.id)
+                    )
+                ).mappings().all()
+                rows.extend(semantic_rows)
+            lexical = {row["id"]: row["lexical_score"] for row in rows}
+            scores = dict(lexical)
+            reasons = {
+                row["id"]: (["text_match"] if lexical[row["id"]] else []) for row in rows
+            }
+            association_ids = {row["id"]: [] for row in rows}
+            # Restrict motif/association work to the bounded lexical and semantic pool.
+            motifs = (
+                await c.execute(
+                    select(
+                        DM.c.dream_id,
+                        DM.c.motif_id,
+                        DM.c.confirmation_state,
+                        M.c.canonical_label,
+                    )
+                    .join(
+                        M,
+                        and_(
+                            M.c.user_id == DM.c.user_id,
+                            M.c.id == DM.c.motif_id,
+                        ),
+                    )
+                    .join(
+                        D,
+                        and_(
+                            D.c.user_id == DM.c.user_id,
+                            D.c.id == DM.c.dream_id,
+                            D.c.current_revision_id == DM.c.revision_id,
+                        ),
+                    )
+                    .where(
+                        DM.c.user_id == user,
+                        DM.c.dream_id.in_([dream_id, *(row["id"] for row in rows)]),
+                        DM.c.confirmation_state != "rejected",
+                        D.c.lifecycle == "saved",
+                        D.c.deleted_at.is_(None),
+                    )
+                    .order_by(DM.c.dream_id, M.c.normalized_key, DM.c.id)
+                    .limit(MAX_MOTIF_CANDIDATE_ROWS + 1)
+                )
+            ).mappings().all()
+            motif_limited = len(motifs) > MAX_MOTIF_CANDIDATE_ROWS
+            motifs = motifs[:MAX_MOTIF_CANDIDATE_ROWS]
+            primary_motifs = {row["motif_id"] for row in motifs if row["dream_id"] == dream_id}
+            candidate_motif_ids = {row["motif_id"] for row in motifs}
+            if candidate_motif_ids:
+                associations = (
+                    await c.execute(
+                        select(A)
+                        .where(
+                            A.c.user_id == user,
+                            A.c.motif_id.in_(candidate_motif_ids),
+                            A.c.status == "confirmed",
+                            A.c.enabled.is_(True),
+                            A.c.deleted_at.is_(None),
+                        )
+                        .order_by(A.c.id)
+                        .limit(MAX_ASSOCIATION_CANDIDATE_ROWS + 1)
+                    )
+                ).mappings().all()
+            else:
+                associations = []
+            associations_limited = len(associations) > MAX_ASSOCIATION_CANDIDATE_ROWS
+            associations = associations[:MAX_ASSOCIATION_CANDIDATE_ROWS]
+            matched_associations = {}
+            for item in associations:
+                if item["motif_id"] in primary_motifs or terms(item["meaning"]) & terms(
+                    source["text"]
+                ):
+                    matched_associations.setdefault(item["motif_id"], []).append(item["id"])
+            for row in motifs:
+                key = row["dream_id"]
+                if key not in scores:
+                    continue
+                if row["motif_id"] in primary_motifs or (
+                    row["canonical_label"].casefold() in source["text"].casefold()
+                ):
+                    confirmed = row["confirmation_state"] == "confirmed"
+                    scores[key] += 6 if confirmed else 2
+                    reasons[key].append("confirmed_motif" if confirmed else "motif_mention")
+                ids = matched_associations.get(row["motif_id"], [])
+                if ids:
+                    scores[key] += 8
+                    reasons[key].append("confirmed_association")
+                    association_ids[key].extend(ids)
+            if archive_limited or lexical_limited:
+                degraded.append("candidate_limit_reached")
+            if motif_limited:
+                degraded.append("motif_candidate_limit_reached")
+            if associations_limited:
+                degraded.append("association_candidate_limit_reached")
+            if indexed < (total_saved or 0):
                 degraded.append("embedding_coverage_incomplete")
             ranks = {
                 row["dream_id"]: (index + 1, float(row["similarity"]))
                 for index, row in enumerate(semantic)
             }
             lexical_order = sorted(
-                (key for key in scores if scores[key] > 0), key=lambda key: (-scores[key], str(key))
+                (key for key in scores if scores[key] > 0),
+                key=lambda key: (-scores[key], str(key)),
             )[:12]
             pool = set(lexical_order) | set(ranks)
             # Preserve strong personal/motif specificity alongside bounded semantic nomination.
             fused = {key: scores[key] + (2 / ranks[key][0] if key in ranks else 0) for key in pool}
             ordered = sorted(pool, key=lambda key: (-fused[key], str(key)))[:12]
-            by_id = {row["id"]: row for row in others}
+            by_id = {row["id"]: row for row in rows}
             job = (
                 (
                     await c.execute(
@@ -282,10 +413,12 @@ class RetrievalService:
                 memory_version=account["memory_version"],
                 degraded=bool(degraded),
                 degraded_reasons=list(dict.fromkeys(degraded)),
+                candidate_search_truncated=archive_limited or lexical_limited,
+                candidate_limit=MAX_CANDIDATE_POOL,
                 active_embedding_version=space["version"] if space else None,
                 target_embedding_version=self.settings.embedding_version,
                 indexed_dreams=indexed,
-                saved_dreams=len(rows),
+                saved_dreams=total_saved or 0,
                 embedding_job_id=job["id"] if job else None,
                 embedding_job_status=job["status"] if job else None,
                 candidates=[

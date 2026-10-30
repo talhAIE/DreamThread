@@ -531,7 +531,7 @@ def test_account_and_pipeline_changes_fence_publication(cluster, field):
 def test_retention_reaper_purges_private_artifacts_and_expired_keys(cluster):
     async def check():
         user = uuid4()
-        async with worker_session(cluster) as (client, db, _, _, worker):
+        async with worker_session(cluster) as (client, db, _, queue, worker):
             dream = (await create(client, user)).json()
             await (
                 worker.run_once()
@@ -559,6 +559,58 @@ def test_retention_reaper_purges_private_artifacts_and_expired_keys(cluster):
                 assert await c.scalar(text("SELECT count(*) FROM app.job_artifacts")) == 0
                 assert await c.scalar(text("SELECT count(*) FROM app.idempotency_keys")) == 0
                 assert await c.scalar(select(J.c.stage)) == "retention_cleaned"
+            assert not any(
+                item["id"] == UUID(dream["analysis_job_id"])
+                for item in await queue.maintenance_candidates()
+            )
+            await worker.maintain_once()
+            async with db.tenant_transaction(user) as c:
+                assert await c.scalar(select(J.c.stage)) == "retention_cleaned"
+
+    run(check)
+
+
+def test_stale_maintenance_candidate_cannot_fail_renewed_lease(cluster):
+    async def check():
+        user = uuid4()
+        async with worker_session(cluster) as (client, db, config, queue, worker):
+            dream = (await create(client, user)).json()
+            job_id = UUID(dream["analysis_job_id"])
+            job = await queue.claim()
+            assert job is not None and job["id"] == job_id
+            async with db.tenant_transaction(user) as c:
+                await c.execute(
+                    update(J)
+                    .where(J.c.id == job_id)
+                    .values(attempts=config.job_max_attempts)
+                )
+            await expire(db, user, job_id)
+            candidates = await queue.maintenance_candidates()
+            candidate = next(item for item in candidates if item["id"] == job_id)
+            async with db.tenant_transaction(user) as c:
+                await c.execute(
+                    update(J)
+                    .where(
+                        J.c.id == job_id,
+                        J.c.status == "running",
+                        J.c.lease_token == job["lease_token"],
+                    )
+                    .values(
+                        leased_until=text("clock_timestamp() + interval '60 seconds'"),
+                    )
+                )
+
+            await worker.store.maintain(candidate)
+
+            async with db.tenant_transaction(user) as c:
+                current = (
+                    await c.execute(
+                        select(J.c.status, J.c.leased_until).where(J.c.id == job_id)
+                    )
+                ).one()
+                now = await c.scalar(select(text("clock_timestamp()")))
+                assert current.status == "running"
+                assert current.leased_until > now
 
     run(check)
 

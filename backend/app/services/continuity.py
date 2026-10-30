@@ -1,0 +1,1274 @@
+"""Dream Continuity Engine (Phase 9).
+
+Tool-bounded connection discovery, citation verification, canonical pair ordering,
+and decision-preserving persistence.
+"""
+
+import asyncio
+import json
+import re
+from pathlib import Path
+from uuid import UUID, uuid4
+
+from pydantic import ValidationError
+from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
+
+from app.db.models import tables
+from app.errors import APIError
+from app.providers.nebius import Nebius
+from app.schemas.analysis import Citation
+from app.schemas.continuity import (
+    ComparisonProposal,
+    ConnectionEvidenceListResponse,
+    ConnectionEvidenceRead,
+    ConnectionListResponse,
+    ConnectionPatchRequest,
+    ConnectionRead,
+    ContinuityOutput,
+)
+from app.services.accounts import active_account
+from app.services.evidence import OutputInvalid, verify_citation
+from app.services.journal import current_source, owned_dream
+from app.services.retrieval import (
+    MAX_CANDIDATE_POOL,
+    RetrievalService,
+    ranked_current_sources,
+    snippet,
+)
+from app.workers.types import LeaseLost, SourceChanged, WorkFailure
+
+PROMPTS = Path(__file__).parents[1] / "prompts"
+
+COMPARISON_STOPWORDS = set(
+    "the and that this with from into through were was are have had has felt feel dream dreams "
+    "then there their they them when where which about outside inside stood walked saw same "
+    "both one two very some what your mine just been being before after".split()
+)
+
+
+def grounded_comparison(quotes_a, quotes_b):
+    """A quote match alone cannot entail arbitrary model prose or psychological causes."""
+    def terms(quotes):
+        return {word for word in re.findall(r"[^\W\d_]+", " ".join(quotes).casefold())
+                if len(word) > 2 and word not in COMPARISON_STOPWORDS}
+
+    common = sorted(terms(quotes_a) & terms(quotes_b))[:6]
+    if not common:
+        return None
+    return "Both saved entries include " + ", ".join(repr(word) for word in common) + (
+        ". Compare the quoted details; shared wording alone does not establish shared meaning."
+    )
+
+CONN = tables["app.connections"]
+DEC = tables["app.connection_decisions"]
+CONN_EVID = tables["app.connection_evidence"]
+EVID = tables["app.evidence"]
+D = tables["app.dreams"]
+R = tables["app.dream_revisions"]
+M = tables["app.motifs"]
+A = tables["app.associations"]
+
+
+CONTINUITY_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_dreams",
+            "description": (
+                "Search the authenticated user's dream archive. Results may be bounded; "
+                "check candidate_limit_reached and results_truncated before treating them "
+                "as complete."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query keywords or motifs"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (1-5)",
+                        "default": 3,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_dreams",
+            "description": "Read the full text and details of specific dream entries by ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of dream UUIDs to inspect",
+                    }
+                },
+                "required": ["ids"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_personal_associations",
+            "description": (
+                "Read confirmed personal associations and meanings for recurring motifs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "motif_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional motif UUIDs",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_confirmed_connections",
+            "description": "Read previously confirmed connections for a dream.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dream_id": {"type": "string", "description": "Dream UUID"},
+                },
+                "required": ["dream_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_comparison",
+            "description": (
+                "Submit a structured connection proposal between two dreams "
+                "with supporting quotes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_dream_id": {"type": "string"},
+                    "candidate_dream_id": {"type": "string"},
+                    "relation_key": {
+                        "type": "string",
+                        "description": "Stable identifier e.g. motif:house or recurring:flying",
+                    },
+                    "similarity_observation": {
+                        "type": "string",
+                        "description": "Observed factual similarities supported by quotes",
+                    },
+                    "difference_observation": {
+                        "type": "string",
+                        "description": "Observed differences or changes",
+                    },
+                    "tentative_reflection": {
+                        "type": "string",
+                        "description": "Tentative interpretation or reflective prompt",
+                    },
+                    "uncertainty_note": {
+                        "type": "string",
+                        "description": "Degree of confidence or ambiguity",
+                    },
+                    "quotes_target": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact quotes from target dream",
+                    },
+                    "quotes_candidate": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact quotes from candidate dream",
+                    },
+                },
+                "required": [
+                    "target_dream_id",
+                    "candidate_dream_id",
+                    "relation_key",
+                    "similarity_observation",
+                    "quotes_target",
+                    "quotes_candidate",
+                ],
+            },
+        },
+    },
+]
+
+
+def canonical_relation_key(raw_key: str) -> str:
+    cleaned = re.sub(r"[^\w:\-]", "_", raw_key.strip().lower())
+    if not cleaned:
+        cleaned = "continuity:similarity"
+    return cleaned[:200]
+
+
+def canonical_pair(id_a: UUID, id_b: UUID):
+    if id_a == id_b:
+        raise ValueError("self_link_rejected")
+    return (id_a, id_b) if str(id_a) < str(id_b) else (id_b, id_a)
+
+
+class ContinuityTools:
+    """Bounded, read-only tools strictly scoped to the authenticated tenant."""
+
+    def __init__(self, connection, user_id: UUID, settings):
+        self.connection = connection
+        self.user_id = user_id
+        self.settings = settings
+
+    async def search_dreams(
+        self, query: str, filters: dict | None = None, limit: int = 3
+    ) -> dict:
+        limit = max(1, min(limit, 5))
+        rows, truncated = await ranked_current_sources(
+            self.connection,
+            self.user_id,
+            query,
+            matching_only=True,
+            recency_tiebreak=True,
+        )
+        return {
+            "results": [
+                {
+                    "id": str(row["id"]),
+                    "title": row["title"],
+                    "dream_date": str(row["dream_date"]),
+                    "snippet": snippet(row["text"], query),
+                }
+                for row in rows[:limit]
+            ],
+            "candidate_limit_reached": truncated,
+            "results_truncated": truncated or len(rows) > limit,
+            "candidate_limit": MAX_CANDIDATE_POOL,
+        }
+
+    async def get_dreams(self, ids: list[str]) -> list[dict]:
+        clean_ids = []
+        for raw in ids[:10]:
+            try:
+                clean_ids.append(UUID(str(raw)))
+            except ValueError:
+                continue
+        if not clean_ids:
+            return []
+
+        c = self.connection
+        rows = (
+            await c.execute(
+                select(
+                    D.c.id,
+                    D.c.title,
+                    D.c.dream_date,
+                    R.c.id.label("revision_id"),
+                    R.c.content_hash,
+                    R.c.text,
+                )
+                .join(
+                    R,
+                    and_(
+                        R.c.user_id == D.c.user_id,
+                        R.c.dream_id == D.c.id,
+                        R.c.id == D.c.current_revision_id,
+                    ),
+                )
+                .where(
+                    D.c.user_id == self.user_id,
+                    D.c.id.in_(clean_ids),
+                    D.c.lifecycle == "saved",
+                    D.c.deleted_at.is_(None),
+                )
+            )
+        ).mappings().all()
+
+        return [
+            {
+                "id": str(r["id"]),
+                "title": r["title"],
+                "dream_date": str(r["dream_date"]),
+                "revision_id": str(r["revision_id"]),
+                "content_hash": r["content_hash"],
+                "text": r["text"][:3000],
+            }
+            for r in rows
+        ]
+
+    async def get_personal_associations(self, motif_ids: list[str] | None = None) -> list[dict]:
+        c = self.connection
+        stmt = (
+            select(M.c.canonical_label, A.c.meaning, A.c.id.label("association_id"))
+            .join(M, and_(M.c.id == A.c.motif_id, M.c.user_id == A.c.user_id))
+            .where(
+                A.c.user_id == self.user_id,
+                A.c.enabled.is_(True),
+                A.c.status == "confirmed",
+                A.c.deleted_at.is_(None),
+            )
+        )
+        if motif_ids:
+            clean_motif_ids = []
+            for raw in motif_ids[:10]:
+                try:
+                    clean_motif_ids.append(UUID(str(raw)))
+                except ValueError:
+                    pass
+            if clean_motif_ids:
+                stmt = stmt.where(M.c.id.in_(clean_motif_ids))
+
+        rows = (await c.execute(stmt)).mappings().all()
+        return [
+            {
+                "association_id": str(r["association_id"]),
+                "motif": r["canonical_label"],
+                "meaning": r["meaning"],
+            }
+            for r in rows
+        ]
+
+    async def get_confirmed_connections(self, dream_id: str) -> list[dict]:
+        try:
+            d_id = UUID(str(dream_id))
+        except ValueError:
+            return []
+        c = self.connection
+        rows = (
+            await c.execute(
+                select(
+                    CONN.c.id,
+                    CONN.c.dream_a_id,
+                    CONN.c.dream_b_id,
+                    CONN.c.relation_key,
+                    CONN.c.observation,
+                    CONN.c.basis_versions,
+                ).where(
+                    CONN.c.user_id == self.user_id,
+                    or_(CONN.c.dream_a_id == d_id, CONN.c.dream_b_id == d_id),
+                    CONN.c.status == "confirmed",
+                )
+                .order_by(CONN.c.updated_at.desc(), CONN.c.id)
+                .limit(20)
+            )
+        ).mappings().all()
+
+        results = []
+        for row in rows:
+            versions = row["basis_versions"] or {}
+            try:
+                dream_a = await owned_dream(c, self.user_id, row["dream_a_id"])
+                source_a = await current_source(c, dream_a)
+                dream_b = await owned_dream(c, self.user_id, row["dream_b_id"])
+                source_b = await current_source(c, dream_b)
+            except APIError:
+                continue
+            if (
+                versions.get("dream_a_revision_id") != str(dream_a["current_revision_id"])
+                or versions.get("dream_b_revision_id") != str(dream_b["current_revision_id"])
+                or versions.get("dream_a_source_hash") != source_a["content_hash"]
+                or versions.get("dream_b_source_hash") != source_b["content_hash"]
+            ):
+                continue
+            results.append(
+                {
+                    "connection_id": str(row["id"]),
+                    "connected_dream_id": str(
+                        row["dream_b_id"] if row["dream_a_id"] == d_id else row["dream_a_id"]
+                    ),
+                    "relation_key": row["relation_key"],
+                    "observation": row["observation"],
+                }
+            )
+        return results
+
+    async def execute_tool(self, name: str, args: dict) -> dict:
+        if name == "search_dreams":
+            return await self.search_dreams(args.get("query", ""), limit=args.get("limit", 3))
+        elif name == "get_dreams":
+            results = await self.get_dreams(args.get("ids", []))
+            return {"dreams": results}
+        elif name == "get_personal_associations":
+            results = await self.get_personal_associations(args.get("motif_ids"))
+            return {"associations": results}
+        elif name == "get_confirmed_connections":
+            results = await self.get_confirmed_connections(args.get("dream_id", ""))
+            return {"confirmed_connections": results}
+        elif name == "propose_comparison":
+            return {"status": "proposal_accepted_for_validation", "proposal": args}
+        return {"error": f"unknown_tool_{name}"}
+
+
+class ContinuityEngine:
+    """Orchestrates candidate comparison, bounded tool calling, verification, and persistence."""
+
+    def __init__(self, db, settings, provider=None):
+        self.db = db
+        self.settings = settings
+        self.provider = provider or Nebius(settings)
+
+    async def compare(
+        self, user_id, target_dream_id, candidate_limit=None, record_call=None, job=None
+    ):
+        try:
+            async with asyncio.timeout(getattr(self.settings, "agent_timeout_seconds", 90)):
+                return await self._compare(
+                    user_id, target_dream_id, candidate_limit, record_call, job
+                )
+        except TimeoutError:
+            raise WorkFailure("provider_timeout", retryable=True) from None
+
+    async def _compare(
+        self,
+        user_id: UUID,
+        target_dream_id: UUID,
+        candidate_limit: int | None = None,
+        record_call=None,
+        job=None,
+    ) -> list[dict]:
+        async with self.db.tenant_transaction(user_id) as c:
+            account = await active_account(c, user_id)
+            target_dream = await owned_dream(c, user_id, target_dream_id)
+            target_source = await current_source(c, target_dream)
+            archive_version = account["archive_version"]
+            if job and (
+                account["data_epoch"] != job["data_epoch"]
+                or account["memory_version"] != job["input_versions"]["memory_version"]
+                or str(target_dream["current_revision_id"]) != job["payload"]["revision_id"]
+            ):
+                raise SourceChanged
+
+        retrieval = RetrievalService(self.db, self.settings)
+        from app.auth.identity import Identity
+
+        identity = Identity(user_id, False)
+        candidate_res = await retrieval.candidates(identity, target_dream_id)
+        if (
+            candidate_res.archive_version != archive_version
+            or candidate_res.revision_id != target_dream["current_revision_id"]
+        ):
+            raise SourceChanged
+
+        limit = candidate_limit or self.settings.agent_max_candidate_dreams
+        top_candidates = candidate_res.candidates[:limit]
+
+        prompt_path = PROMPTS / "continuity_v1.txt"
+        system_prompt = (
+            prompt_path.read_text(encoding="utf-8")
+            if prompt_path.is_file()
+            else "You are the DreamThread Continuity Engine."
+        )
+
+        candidate_summaries = [
+            {
+                "id": str(cand.dream_id),
+                "title": cand.title,
+                "dream_date": str(cand.dream_date),
+                "snippet": cand.snippet,
+                "reasons": cand.reasons,
+            }
+            for cand in top_candidates
+        ]
+
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+                + "\nJSON Schema:\n"
+                + json.dumps(ContinuityOutput.model_json_schema()),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "target_dream": {
+                            "id": str(target_dream_id),
+                            "title": target_dream["title"],
+                            "dream_date": str(target_dream["dream_date"]),
+                            "text": target_source["text"],
+                        },
+                        "historical_candidates": candidate_summaries,
+                        "candidate_search": {
+                            "candidate_limit": candidate_res.candidate_limit,
+                            "truncated": candidate_res.candidate_search_truncated,
+                            "degraded_reasons": candidate_res.degraded_reasons,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        proposals: list[ComparisonProposal] = []
+        rounds = 0
+        tool_invocations = 0
+        max_rounds = self.settings.agent_max_rounds
+        max_tools = self.settings.agent_max_tool_calls
+
+        async def dummy_record(**kwargs):
+            return uuid4()
+
+        recorder = record_call or dummy_record
+        model_run_id = None
+
+        while top_candidates and rounds < max_rounds:
+            rounds += 1
+            completion = await self.provider.complete(
+                messages,
+                schema=ContinuityOutput.model_json_schema() if rounds == max_rounds else None,
+                task="continuity",
+                record=recorder,
+                model=self.settings.nebius_reasoning_model,
+                tools=CONTINUITY_TOOLS if rounds < max_rounds else None,
+            )
+            model_run_id = completion.run_id
+
+            if completion.tool_calls:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": completion.text or None,
+                        "tool_calls": [
+                            {
+                                "id": getattr(tc, "id", str(uuid4())),
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in completion.tool_calls
+                        ],
+                    }
+                )
+
+                for tc in completion.tool_calls:
+                    if tool_invocations >= max_tools:
+                        break
+                    tool_invocations += 1
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+
+                    if tc.function.name == "propose_comparison":
+                        try:
+                            proposal_obj = ComparisonProposal.model_validate(args)
+                            proposals.append(proposal_obj)
+                        except ValidationError:
+                            pass
+
+                    async with self.db.tenant_transaction(user_id) as tool_connection:
+                        tools = ContinuityTools(tool_connection, user_id, self.settings)
+                        tool_result = await tools.execute_tool(tc.function.name, args)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": getattr(tc, "id", str(uuid4())),
+                            "name": tc.function.name,
+                            "content": json.dumps(tool_result),
+                        }
+                    )
+                continue
+
+            if completion.text:
+                try:
+                    output = ContinuityOutput.model_validate_json(completion.text)
+                    proposals.extend(output.comparisons)
+                except (ValidationError, ValueError):
+                    pass
+                break
+
+        async with self.db.tenant_transaction(user_id) as c:
+            current_account = await active_account(c, user_id)
+            current_target = await owned_dream(c, user_id, target_dream_id)
+            current_target_source = await current_source(c, current_target)
+            if (
+                current_account["archive_version"] != archive_version
+                or current_target["current_revision_id"] != target_dream["current_revision_id"]
+                or current_target_source["content_hash"] != target_source["content_hash"]
+            ):
+                raise SourceChanged
+            if job:
+                jobs = tables["app.jobs"]
+                current = (await c.execute(select(jobs).where(
+                    jobs.c.id == job["id"], jobs.c.user_id == user_id
+                ).with_for_update())).mappings().one_or_none()
+                now = await c.scalar(select(func.clock_timestamp()))
+                if (not current or current["status"] != "running"
+                        or current["lease_token"] != job["lease_token"]
+                        or current["leased_until"] <= now or current["deadline_at"] <= now):
+                    raise LeaseLost
+                if (current_account["data_epoch"] != job["data_epoch"]
+                        or current_account["memory_version"] !=
+                        job["input_versions"]["memory_version"]):
+                    raise SourceChanged
+            verified_connections = await self._verify_and_persist(
+                c, user_id, target_dream_id, target_source, proposals, model_run_id
+            )
+            if job:
+                await c.execute(update(jobs).where(jobs.c.id == job["id"]).values(
+                    status="succeeded", stage="ready", error_code=None,
+                    lease_token=None, leased_until=None, deadline_at=None, stage_deadline_at=None,
+                ))
+        return verified_connections
+
+    async def _verify_and_persist(
+        self,
+        c,
+        user_id: UUID,
+        target_dream_id: UUID,
+        target_source: dict,
+        proposals: list[ComparisonProposal],
+        model_run_id: UUID | None,
+    ) -> list[dict]:
+        saved_connections = []
+
+        for p in proposals:
+            if p.target_dream_id != target_dream_id:
+                continue
+            if p.target_dream_id == p.candidate_dream_id:
+                continue
+
+            try:
+                candidate_dream = await owned_dream(c, user_id, p.candidate_dream_id)
+                candidate_source = await current_source(c, candidate_dream)
+            except APIError:
+                continue
+
+            try:
+                dream_a_id, dream_b_id = canonical_pair(p.target_dream_id, p.candidate_dream_id)
+            except ValueError:
+                continue
+
+            if dream_a_id == target_dream_id:
+                src_a, src_b = target_source, candidate_source
+                quotes_a, quotes_b = p.quotes_target, p.quotes_candidate
+            else:
+                src_a, src_b = candidate_source, target_source
+                quotes_a, quotes_b = p.quotes_candidate, p.quotes_target
+
+            hash_a = src_a.get("content_hash") or src_a.get("source_hash") or ""
+            hash_b = src_b.get("content_hash") or src_b.get("source_hash") or ""
+            rev_a = src_a.get("revision_id") or src_a.get("id")
+            rev_b = src_b.get("revision_id") or src_b.get("id")
+
+            verified_citations_a = []
+            for q in quotes_a:
+                q = q.strip()
+                if not q:
+                    continue
+                start_idx = src_a["text"].find(q)
+                if start_idx < 0 or src_a["text"].find(q, start_idx + 1) >= 0:
+                    continue
+                end_idx = start_idx + len(q)
+                citation = Citation(
+                    dream_id=dream_a_id,
+                    revision_id=rev_a,
+                    source_hash=hash_a,
+                    start=start_idx,
+                    end=end_idx,
+                    quote=q,
+                )
+                try:
+                    v = verify_citation(
+                        citation,
+                        dream_id=dream_a_id,
+                        revision_id=rev_a,
+                        source_hash=hash_a,
+                        text=src_a["text"],
+                    )
+                    verified_citations_a.append(v)
+                except OutputInvalid:
+                    pass
+
+            verified_citations_b = []
+            for q in quotes_b:
+                q = q.strip()
+                if not q:
+                    continue
+                start_idx = src_b["text"].find(q)
+                if start_idx < 0:
+                    continue
+                end_idx = start_idx + len(q)
+                citation = Citation(
+                    dream_id=dream_b_id,
+                    revision_id=rev_b,
+                    source_hash=hash_b,
+                    start=start_idx,
+                    end=end_idx,
+                    quote=q,
+                )
+                try:
+                    v = verify_citation(
+                        citation,
+                        dream_id=dream_b_id,
+                        revision_id=rev_b,
+                        source_hash=hash_b,
+                        text=src_b["text"],
+                    )
+                    verified_citations_b.append(v)
+                except OutputInvalid:
+                    pass
+
+            # Claim entailment screening: must have at least one verified quote from each dream
+            if not verified_citations_a or not verified_citations_b:
+                continue
+            observation = grounded_comparison(
+                [item.quote for item in verified_citations_a],
+                [item.quote for item in verified_citations_b],
+            )
+            if observation is None:
+                continue
+
+            rel_key = canonical_relation_key(p.relation_key)
+
+            existing_decision = (
+                await c.execute(
+                    select(DEC.c.decision, DEC.c.version).where(
+                        DEC.c.user_id == user_id,
+                        DEC.c.dream_a_id == dream_a_id,
+                        DEC.c.dream_b_id == dream_b_id,
+                        DEC.c.relation_key == rel_key,
+                    )
+                )
+            ).mappings().first()
+
+            if existing_decision:
+                status = existing_decision["decision"]
+            else:
+                status = "suggested"
+
+            basis_versions = {
+                "dream_a_revision_id": str(rev_a),
+                "dream_b_revision_id": str(rev_b),
+                "dream_a_source_hash": hash_a,
+                "dream_b_source_hash": hash_b,
+            }
+
+            conn_row = (
+                await c.execute(
+                    select(CONN.c.id, CONN.c.status).where(
+                        CONN.c.user_id == user_id,
+                        CONN.c.dream_a_id == dream_a_id,
+                        CONN.c.dream_b_id == dream_b_id,
+                        CONN.c.relation_key == rel_key,
+                    )
+                )
+            ).mappings().first()
+
+            if conn_row:
+                connection_id = conn_row["id"]
+                await c.execute(
+                    update(CONN)
+                    .where(CONN.c.id == connection_id)
+                    .values(
+                        status=status,
+                        observation=observation,
+                        basis_versions=basis_versions,
+                        model_run_id=model_run_id,
+                    )
+                )
+            else:
+                connection_id = uuid4()
+                await c.execute(
+                    insert(CONN).values(
+                        id=connection_id,
+                        user_id=user_id,
+                        dream_a_id=dream_a_id,
+                        dream_b_id=dream_b_id,
+                        relation_key=rel_key,
+                        status=status,
+                        observation=observation,
+                        basis_versions=basis_versions,
+                        model_run_id=model_run_id,
+                    )
+                )
+
+            all_citations = verified_citations_a + verified_citations_b
+            # A refreshed connection must reference ONLY its current source revisions.
+            await c.execute(delete(CONN_EVID).where(
+                CONN_EVID.c.user_id == user_id, CONN_EVID.c.connection_id == connection_id
+            ))
+            for cit in all_citations:
+                # The account row is locked by compare's publication transaction.
+                # Reuse an exact span without inventing a nonexistent UNIQUE constraint.
+                actual_evid_id = await c.scalar(
+                    select(EVID.c.id).where(
+                        EVID.c.user_id == user_id,
+                        EVID.c.dream_id == cit.dream_id,
+                        EVID.c.revision_id == cit.revision_id,
+                        EVID.c.start == cit.start,
+                        EVID.c.end == cit.end,
+                        EVID.c.content_hash == cit.source_hash,
+                    ).order_by(EVID.c.id).limit(1)
+                )
+                if actual_evid_id is None:
+                    actual_evid_id = uuid4()
+                    await c.execute(insert(EVID).values(
+                        id=actual_evid_id, user_id=user_id, dream_id=cit.dream_id,
+                        revision_id=cit.revision_id, start=cit.start, end=cit.end,
+                        exact_quote=cit.quote, content_hash=cit.source_hash,
+                    ))
+
+                if actual_evid_id:
+                    await c.execute(
+                        insert(CONN_EVID)
+                        .values(
+                            id=uuid4(),
+                            user_id=user_id,
+                            connection_id=connection_id,
+                            evidence_id=actual_evid_id,
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=[
+                                CONN_EVID.c.user_id,
+                                CONN_EVID.c.connection_id,
+                                CONN_EVID.c.evidence_id,
+                            ]
+                        )
+                    )
+
+            saved_connections.append(
+                {
+                    "id": connection_id,
+                    "dream_a_id": dream_a_id,
+                    "dream_b_id": dream_b_id,
+                    "relation_key": rel_key,
+                    "status": status,
+                    "observation": observation,
+                }
+            )
+
+        return saved_connections
+
+
+class ContinuityService:
+    """Service consumed by FastAPI endpoints and background worker."""
+
+    def __init__(self, db, settings, provider=None):
+        self.db = db
+        self.settings = settings
+        self.engine = ContinuityEngine(db, settings, provider)
+
+    async def enqueue_connections(self, identity, dream_id, key):
+        from app.schemas.continuity import ContinuityAccepted
+        from app.services.admission import reserve_ai
+
+        jobs = tables["app.jobs"]
+        async with self.db.tenant_transaction(identity.user_id) as c:
+            account = await active_account(c, identity.user_id)
+            dream = await owned_dream(c, identity.user_id, dream_id)
+            if dream["lifecycle"] != "saved":
+                raise APIError("invalid_transition", "Save the dream before comparing", 409)
+            admitted = await reserve_ai(c, identity, self.settings, route="continuity.analyze",
+                key=key, body={"dream_id": str(dream_id)})
+            if admitted.replayed:
+                row = (await c.execute(select(jobs).where(
+                    jobs.c.id == admitted.resource_id, jobs.c.user_id == identity.user_id
+                ))).mappings().one()
+            else:
+                row = (await c.execute(insert(jobs).values(
+                    id=admitted.resource_id, user_id=identity.user_id, kind="continuity",
+                    dedupe_key=str(admitted.resource_id), data_epoch=account["data_epoch"],
+                    payload={"dream_id": str(dream_id),
+                             "revision_id": str(dream["current_revision_id"])},
+                    input_versions={"archive_version": account["archive_version"],
+                                    "memory_version": account["memory_version"]},
+                ).returning(jobs))).mappings().one()
+            return ContinuityAccepted(job_id=row["id"], status=row["status"])
+
+    async def get_connections_for_dream(
+        self, user_id: UUID, dream_id: UUID, include_rejected: bool = False
+    ) -> ConnectionListResponse:
+        async with self.db.tenant_transaction(user_id) as c:
+            await active_account(c, user_id)
+            await owned_dream(c, user_id, dream_id)
+
+            stmt = (
+                select(
+                    CONN.c.id,
+                    CONN.c.dream_a_id,
+                    CONN.c.dream_b_id,
+                    CONN.c.relation_key,
+                    CONN.c.status,
+                    CONN.c.observation,
+                    CONN.c.basis_versions,
+                    CONN.c.model_run_id,
+                    CONN.c.created_at,
+                    CONN.c.updated_at,
+                    DEC.c.decision,
+                    DEC.c.version.label("decision_version"),
+                )
+                .outerjoin(
+                    DEC,
+                    and_(
+                        DEC.c.user_id == CONN.c.user_id,
+                        DEC.c.dream_a_id == CONN.c.dream_a_id,
+                        DEC.c.dream_b_id == CONN.c.dream_b_id,
+                        DEC.c.relation_key == CONN.c.relation_key,
+                    ),
+                )
+                .where(
+                    CONN.c.user_id == user_id,
+                    or_(CONN.c.dream_a_id == dream_id, CONN.c.dream_b_id == dream_id),
+                )
+                .order_by(CONN.c.created_at.desc())
+            )
+            statuses = ("suggested", "confirmed", "rejected") if include_rejected else (
+                "suggested",
+                "confirmed",
+            )
+            stmt = stmt.where(CONN.c.status.in_(statuses))
+
+            rows = (await c.execute(stmt)).mappings().all()
+
+            results = []
+            for r in rows:
+                other_id = r["dream_b_id"] if r["dream_a_id"] == dream_id else r["dream_a_id"]
+                other_dream = (
+                    await c.execute(
+                        select(D.c.title, D.c.deleted_at).where(
+                            D.c.user_id == user_id, D.c.id == other_id
+                        )
+                    )
+                ).mappings().first()
+
+                if not other_dream or other_dream["deleted_at"] is not None:
+                    continue
+
+                evidence_count = await c.scalar(
+                    select(CONN_EVID.c.id)
+                    .where(
+                        CONN_EVID.c.user_id == user_id,
+                        CONN_EVID.c.connection_id == r["id"],
+                    )
+                )
+
+                results.append(
+                    ConnectionRead(
+                        id=r["id"],
+                        dream_a_id=r["dream_a_id"],
+                        dream_b_id=r["dream_b_id"],
+                        connected_dream_id=other_id,
+                        connected_dream_title=other_dream["title"],
+                        relation_key=r["relation_key"],
+                        status=r["status"],
+                        observation=r["observation"],
+                        basis_versions=r["basis_versions"] or {},
+                        model_run_id=r["model_run_id"],
+                        decision=r["decision"],
+                        decision_version=r["decision_version"],
+                        created_at=r["created_at"],
+                        updated_at=r["updated_at"],
+                        evidence_count=1 if evidence_count else 0,
+                    )
+                )
+
+            return ConnectionListResponse(
+                dream_id=dream_id,
+                connections=results,
+                count=len(results),
+            )
+
+    async def patch_connection(
+        self, user_id: UUID, connection_id: UUID, patch: ConnectionPatchRequest
+    ) -> ConnectionRead:
+        async with self.db.tenant_transaction(user_id) as c:
+            await active_account(c, user_id)
+            conn = (
+                await c.execute(
+                    select(
+                        CONN.c.id,
+                        CONN.c.dream_a_id,
+                        CONN.c.dream_b_id,
+                        CONN.c.relation_key,
+                        CONN.c.status,
+                        CONN.c.observation,
+                        CONN.c.basis_versions,
+                        CONN.c.model_run_id,
+                        CONN.c.created_at,
+                        CONN.c.updated_at,
+                    )
+                    .where(CONN.c.id == connection_id, CONN.c.user_id == user_id)
+                    .with_for_update()
+                )
+            ).mappings().first()
+
+            if not conn:
+                raise APIError("not_found", "Connection not found", 404)
+
+            existing_dec = (
+                await c.execute(
+                    select(DEC.c.id, DEC.c.decision, DEC.c.version).where(
+                        DEC.c.user_id == user_id,
+                        DEC.c.dream_a_id == conn["dream_a_id"],
+                        DEC.c.dream_b_id == conn["dream_b_id"],
+                        DEC.c.relation_key == conn["relation_key"],
+                    )
+                    .with_for_update()
+                )
+            ).mappings().first()
+
+            current_ver = existing_dec["version"] if existing_dec else 1
+            if current_ver != patch.expected_version:
+                raise APIError("version_conflict", "Decision version mismatch", 409)
+
+            new_ver = current_ver + 1
+            if existing_dec:
+                await c.execute(
+                    update(DEC)
+                    .where(DEC.c.id == existing_dec["id"])
+                    .values(decision=patch.decision, version=new_ver)
+                )
+            else:
+                await c.execute(
+                    insert(DEC).values(
+                        id=uuid4(),
+                        user_id=user_id,
+                        dream_a_id=conn["dream_a_id"],
+                        dream_b_id=conn["dream_b_id"],
+                        relation_key=conn["relation_key"],
+                        decision=patch.decision,
+                        version=new_ver,
+                    )
+                )
+
+            await c.execute(
+                update(CONN)
+                .where(CONN.c.id == connection_id, CONN.c.user_id == user_id)
+                .values(status=patch.decision)
+            )
+
+            if patch.decision != conn["status"]:
+                stories = tables["app.storylines"]
+                jobs = tables["app.jobs"]
+                await c.execute(
+                    update(stories)
+                    .where(stories.c.user_id == user_id)
+                    .values(status="stale")
+                )
+                await c.execute(
+                    update(jobs)
+                    .where(
+                        jobs.c.user_id == user_id,
+                        jobs.c.kind == "storyline_refresh",
+                        jobs.c.status.in_(("queued", "running")),
+                    )
+                    .values(
+                        status="cancelled",
+                        stage="superseded",
+                        error_code="continuity_changed",
+                        lease_token=None,
+                        leased_until=None,
+                        deadline_at=None,
+                        stage_deadline_at=None,
+                    )
+                )
+                await c.execute(
+                    update(tables["app.accounts"])
+                    .where(tables["app.accounts"].c.id == user_id)
+                    .values(
+                        archive_version=tables["app.accounts"].c.archive_version + 1
+                    )
+                )
+
+            updated_conn = (
+                await c.execute(
+                    select(CONN).where(
+                        CONN.c.id == connection_id, CONN.c.user_id == user_id
+                    )
+                )
+            ).mappings().first()
+
+            return ConnectionRead(
+                id=updated_conn["id"],
+                dream_a_id=updated_conn["dream_a_id"],
+                dream_b_id=updated_conn["dream_b_id"],
+                connected_dream_id=updated_conn["dream_b_id"],
+                relation_key=updated_conn["relation_key"],
+                status=updated_conn["status"],
+                observation=updated_conn["observation"],
+                basis_versions=updated_conn["basis_versions"] or {},
+                model_run_id=updated_conn["model_run_id"],
+                decision=patch.decision,
+                decision_version=new_ver,
+                created_at=updated_conn["created_at"],
+                updated_at=updated_conn["updated_at"],
+            )
+
+    async def get_connection_evidence(
+        self, user_id: UUID, connection_id: UUID
+    ) -> ConnectionEvidenceListResponse:
+        async with self.db.tenant_transaction(user_id) as c:
+            await active_account(c, user_id)
+            conn = (
+                await c.execute(
+                    select(
+                        CONN.c.id,
+                        CONN.c.dream_a_id,
+                        CONN.c.dream_b_id,
+                        CONN.c.basis_versions,
+                        CONN.c.status,
+                    ).where(CONN.c.id == connection_id, CONN.c.user_id == user_id)
+                )
+            ).mappings().first()
+
+            if not conn:
+                raise APIError("not_found", "Connection not found", 404)
+            if conn["status"] not in {"suggested", "confirmed"}:
+                raise APIError("stale_evidence", "Connection evidence is no longer current", 409)
+
+            endpoints = (
+                await c.execute(
+                    select(
+                        D.c.id,
+                        D.c.current_revision_id,
+                        R.c.content_hash,
+                    )
+                    .join(
+                        R,
+                        and_(
+                            R.c.user_id == D.c.user_id,
+                            R.c.dream_id == D.c.id,
+                            R.c.id == D.c.current_revision_id,
+                        ),
+                    )
+                    .where(
+                        D.c.user_id == user_id,
+                        D.c.id.in_([conn["dream_a_id"], conn["dream_b_id"]]),
+                        D.c.lifecycle == "saved",
+                        D.c.deleted_at.is_(None),
+                    )
+                )
+            ).mappings().all()
+            current_by_dream = {
+                row["id"]: (str(row["current_revision_id"]), row["content_hash"])
+                for row in endpoints
+            }
+            versions = conn["basis_versions"] or {}
+            if (
+                len(current_by_dream) != 2
+                or versions.get("dream_a_revision_id")
+                != current_by_dream.get(conn["dream_a_id"], (None, None))[0]
+                or versions.get("dream_b_revision_id")
+                != current_by_dream.get(conn["dream_b_id"], (None, None))[0]
+                or versions.get("dream_a_source_hash")
+                != current_by_dream.get(conn["dream_a_id"], (None, None))[1]
+                or versions.get("dream_b_source_hash")
+                != current_by_dream.get(conn["dream_b_id"], (None, None))[1]
+            ):
+                raise APIError("stale_evidence", "Connection evidence is no longer current", 409)
+
+            rows = (
+                await c.execute(
+                    select(
+                        EVID.c.id,
+                        EVID.c.dream_id,
+                        EVID.c.revision_id,
+                        EVID.c.start,
+                        EVID.c.end,
+                        EVID.c.exact_quote,
+                        EVID.c.content_hash,
+                        R.c.text,
+                        R.c.content_hash.label("revision_hash"),
+                    )
+                    .join(
+                        CONN_EVID,
+                        and_(
+                            CONN_EVID.c.evidence_id == EVID.c.id,
+                            CONN_EVID.c.user_id == user_id,
+                        ),
+                    )
+                    .join(
+                        D,
+                        and_(
+                            D.c.user_id == EVID.c.user_id,
+                            D.c.id == EVID.c.dream_id,
+                            D.c.current_revision_id == EVID.c.revision_id,
+                            D.c.lifecycle == "saved",
+                            D.c.deleted_at.is_(None),
+                        ),
+                    )
+                    .join(
+                        R,
+                        and_(
+                            R.c.user_id == EVID.c.user_id,
+                            R.c.dream_id == EVID.c.dream_id,
+                            R.c.id == EVID.c.revision_id,
+                        ),
+                    )
+                    .where(
+                        CONN_EVID.c.user_id == user_id,
+                        CONN_EVID.c.connection_id == connection_id,
+                        EVID.c.user_id == user_id,
+                        EVID.c.dream_id.in_([conn["dream_a_id"], conn["dream_b_id"]]),
+                        D.c.user_id == user_id,
+                        R.c.user_id == user_id,
+                    )
+                    .order_by(EVID.c.dream_id, EVID.c.start)
+                )
+            ).mappings().all()
+
+            evidence_items = []
+            for row in rows:
+                if (
+                    not 0 <= row["start"] < row["end"] <= len(row["text"])
+                    or row["text"][row["start"] : row["end"]] != row["exact_quote"]
+                ):
+                    raise APIError(
+                        "stale_evidence", "Connection evidence failed source verification", 409
+                    )
+                citation = Citation(
+                    dream_id=row["dream_id"],
+                    revision_id=row["revision_id"],
+                    source_hash=row["content_hash"],
+                    start=row["start"],
+                    end=row["end"],
+                    quote=row["exact_quote"],
+                )
+                if row["content_hash"] != row["revision_hash"]:
+                    raise APIError(
+                        "stale_evidence", "Connection evidence failed source verification", 409
+                    )
+                try:
+                    verify_citation(
+                        citation,
+                        dream_id=row["dream_id"],
+                        revision_id=row["revision_id"],
+                        source_hash=row["revision_hash"],
+                        text=row["text"],
+                    )
+                except OutputInvalid:
+                    raise APIError(
+                        "stale_evidence", "Connection evidence failed source verification", 409
+                    ) from None
+                evidence_items.append(
+                    ConnectionEvidenceRead(
+                        id=row["id"],
+                        dream_id=row["dream_id"],
+                        revision_id=row["revision_id"],
+                        start=row["start"],
+                        end=row["end"],
+                        exact_quote=row["exact_quote"],
+                        content_hash=row["content_hash"],
+                    )
+                )
+
+            return ConnectionEvidenceListResponse(
+                connection_id=connection_id,
+                evidence=evidence_items,
+            )
+
+    async def analyze_connections(self, user_id: UUID, dream_id: UUID) -> ConnectionListResponse:
+        try:
+            await self.engine.compare(user_id, dream_id)
+        except SourceChanged as error:
+            raise APIError(
+                "source_changed", "Dream changed during connection analysis", 409
+            ) from error
+        return await self.get_connections_for_dream(user_id, dream_id)
